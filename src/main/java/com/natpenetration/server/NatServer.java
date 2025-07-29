@@ -1,22 +1,23 @@
 package com.natpenetration.server;
 
 import com.natpenetration.common.Config;
+import com.natpenetration.common.Message;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.net.ServerSocket;
-import java.net.Socket;
+import java.net.InetSocketAddress;
+import java.nio.ByteBuffer;
+import java.nio.channels.*;
+import java.util.Iterator;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /**
  * NAT穿透服务端
- * 负责：
- * 1. 监听客户端连接
- * 2. 管理客户端隧道
- * 3. 处理外部请求并转发给客户端
+ * 基于NIO实现，使用零拷贝技术
  */
 public class NatServer {
     
@@ -24,12 +25,13 @@ public class NatServer {
     
     private final int serverPort;
     private final int tunnelPort;
-    private final ExecutorService executorService;
-    private final ConcurrentHashMap<String, ClientHandler> clients;
-    private final RequestHandler requestHandler;
+    private final ConcurrentHashMap<String, ClientSession> clients;
+    private final ConcurrentHashMap<String, TunnelSession> tunnels;
     
-    private ServerSocket serverSocket;
-    private ServerSocket tunnelSocket;
+    private Selector selector;
+    private ServerSocketChannel serverChannel;
+    private ServerSocketChannel tunnelChannel;
+    private ScheduledExecutorService scheduler;
     private volatile boolean running = false;
     
     public NatServer() {
@@ -39,10 +41,8 @@ public class NatServer {
     public NatServer(int serverPort, int tunnelPort) {
         this.serverPort = serverPort;
         this.tunnelPort = tunnelPort;
-        // 使用虚拟线程执行器
-        this.executorService = Executors.newVirtualThreadPerTaskExecutor();
         this.clients = new ConcurrentHashMap<>();
-        this.requestHandler = new RequestHandler(this);
+        this.tunnels = new ConcurrentHashMap<>();
     }
     
     /**
@@ -54,18 +54,27 @@ public class NatServer {
             return;
         }
         
-        running = true;
-        
         try {
+            // 初始化选择器
+            selector = Selector.open();
+            
             // 启动客户端连接监听
             startClientListener();
             
-            // 启动外部请求监听
-            startRequestListener();
+            // 启动隧道监听
+            startTunnelListener();
             
+            // 启动心跳调度器
+            scheduler = Executors.newScheduledThreadPool(1);
+            scheduler.scheduleAtFixedRate(this::sendHeartbeat, 0, Config.HEARTBEAT_INTERVAL, TimeUnit.MILLISECONDS);
+            
+            running = true;
             logger.info("NAT穿透服务端启动成功");
             logger.info("客户端连接端口: {}", serverPort);
-            logger.info("外部请求端口: {}", tunnelPort);
+            logger.info("隧道端口: {}", tunnelPort);
+            
+            // 主事件循环
+            eventLoop();
             
         } catch (IOException e) {
             logger.error("启动服务端失败", e);
@@ -77,49 +86,126 @@ public class NatServer {
      * 启动客户端连接监听
      */
     private void startClientListener() throws IOException {
-        serverSocket = new ServerSocket(serverPort);
-        
-        executorService.submit(() -> {
-            logger.info("开始监听客户端连接，端口: {}", serverPort);
-            
-            while (running) {
-                try {
-                    Socket clientSocket = serverSocket.accept();
-                    logger.info("新的客户端连接: {}", clientSocket.getInetAddress());
-                    
-                    ClientHandler clientHandler = new ClientHandler(clientSocket, this);
-                    executorService.submit(clientHandler);
-                    
-                } catch (IOException e) {
-                    if (running) {
-                        logger.error("接受客户端连接时发生错误", e);
-                    }
-                }
-            }
-        });
+        serverChannel = ServerSocketChannel.open();
+        serverChannel.configureBlocking(false);
+        serverChannel.socket().bind(new InetSocketAddress(serverPort));
+        serverChannel.register(selector, SelectionKey.OP_ACCEPT);
+        logger.info("开始监听客户端连接，端口: {}", serverPort);
     }
     
     /**
-     * 启动外部请求监听
+     * 启动隧道监听
      */
-    private void startRequestListener() throws IOException {
-        tunnelSocket = new ServerSocket(tunnelPort);
-        
-        executorService.submit(() -> {
-            logger.info("开始监听外部请求，端口: {}", tunnelPort);
-            
-            while (running) {
-                try {
-                    Socket requestSocket = tunnelSocket.accept();
-                    logger.info("新的外部请求: {}", requestSocket.getInetAddress());
+    private void startTunnelListener() throws IOException {
+        tunnelChannel = ServerSocketChannel.open();
+        tunnelChannel.configureBlocking(false);
+        tunnelChannel.socket().bind(new InetSocketAddress(tunnelPort));
+        tunnelChannel.register(selector, SelectionKey.OP_ACCEPT);
+        logger.info("开始监听隧道连接，端口: {}", tunnelPort);
+    }
+    
+    /**
+     * 主事件循环
+     */
+    private void eventLoop() {
+        while (running) {
+            try {
+                int readyChannels = selector.select(1000);
+                if (readyChannels == 0) {
+                    continue;
+                }
+                
+                Iterator<SelectionKey> keyIterator = selector.selectedKeys().iterator();
+                while (keyIterator.hasNext()) {
+                    SelectionKey key = keyIterator.next();
+                    keyIterator.remove();
                     
-                    executorService.submit(() -> requestHandler.handleRequest(requestSocket));
+                    if (!key.isValid()) {
+                        continue;
+                    }
                     
-                } catch (IOException e) {
-                    if (running) {
-                        logger.error("接受外部请求时发生错误", e);
+                    if (key.isAcceptable()) {
+                        handleAccept(key);
+                    } else if (key.isReadable()) {
+                        handleRead(key);
+                    } else if (key.isWritable()) {
+                        handleWrite(key);
                     }
                 }
+            } catch (IOException e) {
+                if (running) {
+                    logger.error("事件循环处理错误", e);
+                }
+            }
+        }
+    }
+    
+    /**
+     * 处理连接接受事件
+     */
+    private void handleAccept(SelectionKey key) throws IOException {
+        ServerSocketChannel serverSocketChannel = (ServerSocketChannel) key.channel();
+        SocketChannel clientChannel = serverSocketChannel.accept();
+        clientChannel.configureBlocking(false);
+        
+        if (serverSocketChannel == serverChannel) {
+            // 客户端连接
+            String clientId = "client_" + System.currentTimeMillis();
+            ClientSession clientSession = new ClientSession(clientId, clientChannel, this);
+            clients.put(clientId, clientSession);
+            
+            clientChannel.register(selector, SelectionKey.OP_READ, clientSession);
+            logger.info("新的客户端连接: {} -> {}", clientChannel.getRemoteAddress(), clientId);
+            
+        } else if (serverSocketChannel == tunnelChannel) {
+            // 隧道连接
+            String tunnelId = "tunnel_" + System.currentTimeMillis();
+            TunnelSession tunnelSession = new TunnelSession(tunnelId, clientChannel, this);
+            tunnels.put(tunnelId, tunnelSession);
+            
+            clientChannel.register(selector, SelectionKey.OP_READ, tunnelSession);
+            logger.info("新的隧道连接: {} -> {}", clientChannel.getRemoteAddress(), tunnelId);
+        }
+    }
+    
+    /**
+     * 处理读事件
+     */
+    private void handleRead(SelectionKey key) throws IOException {
+        Object attachment = key.attachment();
+        
+        if (attachment instanceof ClientSession) {
+            ((ClientSession) attachment).handleRead();
+        } else if (attachment instanceof TunnelSession) {
+            ((TunnelSession) attachment).handleRead();
+        }
+    }
+    
+    /**
+     * 处理写事件
+     */
+    private void handleWrite(SelectionKey key) throws IOException {
+        Object attachment = key.attachment();
+        
+        if (attachment instanceof ClientSession) {
+            ((ClientSession) attachment).handleWrite();
+        } else if (attachment instanceof TunnelSession) {
+            ((TunnelSession) attachment).handleWrite();
+        }
+    }
+    
+    /**
+     * 发送心跳
+     */
+    private void sendHeartbeat() {
+        Message heartbeat = new Message(Message.Type.HEARTBEAT, null, null, null);
+        ByteBuffer buffer = heartbeat.toByteBuffer();
+        
+        clients.values().forEach(client -> {
+            try {
+                client.sendMessage(buffer.duplicate());
+            } catch (IOException e) {
+                logger.error("发送心跳失败: {}", client.getClientId(), e);
             }
         });
     }
@@ -136,69 +222,78 @@ public class NatServer {
         logger.info("正在停止服务端...");
         
         // 关闭所有客户端连接
-        clients.values().forEach(ClientHandler::disconnect);
+        clients.values().forEach(ClientSession::close);
         clients.clear();
         
-        // 关闭服务器套接字
-        try {
-            if (serverSocket != null && !serverSocket.isClosed()) {
-                serverSocket.close();
-            }
-            if (tunnelSocket != null && !tunnelSocket.isClosed()) {
-                tunnelSocket.close();
-            }
-        } catch (IOException e) {
-            logger.error("关闭服务器套接字时发生错误", e);
+        // 关闭所有隧道连接
+        tunnels.values().forEach(TunnelSession::close);
+        tunnels.clear();
+        
+        // 关闭调度器
+        if (scheduler != null) {
+            scheduler.shutdown();
         }
         
-        // 关闭线程池
-        executorService.shutdown();
+        // 关闭选择器
+        try {
+            if (selector != null) {
+                selector.close();
+            }
+            if (serverChannel != null) {
+                serverChannel.close();
+            }
+            if (tunnelChannel != null) {
+                tunnelChannel.close();
+            }
+        } catch (IOException e) {
+            logger.error("关闭服务端资源时发生错误", e);
+        }
         
         logger.info("服务端已停止");
     }
     
     /**
-     * 注册客户端
+     * 获取客户端会话
      */
-    public void registerClient(String clientId, ClientHandler clientHandler) {
-        clients.put(clientId, clientHandler);
-        logger.info("客户端 {} 已注册，当前连接数: {}", clientId, clients.size());
-    }
-    
-    /**
-     * 注销客户端
-     */
-    public void unregisterClient(String clientId) {
-        clients.remove(clientId);
-        logger.info("客户端 {} 已注销，当前连接数: {}", clientId, clients.size());
-    }
-    
-    /**
-     * 获取客户端处理器
-     */
-    public ClientHandler getClient(String clientId) {
+    public ClientSession getClient(String clientId) {
         return clients.get(clientId);
+    }
+    
+    /**
+     * 获取隧道会话
+     */
+    public TunnelSession getTunnel(String tunnelId) {
+        return tunnels.get(tunnelId);
+    }
+    
+    /**
+     * 移除客户端会话
+     */
+    public void removeClient(String clientId) {
+        clients.remove(clientId);
+        logger.info("客户端 {} 已断开连接", clientId);
+    }
+    
+    /**
+     * 获取选择器
+     */
+    public Selector getSelector() {
+        return selector;
     }
     
     /**
      * 获取所有客户端
      */
-    public ConcurrentHashMap<String, ClientHandler> getClients() {
+    public ConcurrentHashMap<String, ClientSession> getClients() {
         return clients;
     }
     
     /**
-     * 检查服务端是否正在运行
+     * 移除隧道会话
      */
-    public boolean isRunning() {
-        return running;
-    }
-    
-    /**
-     * 获取请求处理器
-     */
-    public RequestHandler getRequestHandler() {
-        return requestHandler;
+    public void removeTunnel(String tunnelId) {
+        tunnels.remove(tunnelId);
+        logger.info("隧道 {} 已断开连接", tunnelId);
     }
     
     /**
