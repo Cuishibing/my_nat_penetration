@@ -46,7 +46,6 @@ public class ClientSession {
         }
         
         try {
-            readBuffer.clear();
             int bytesRead = channel.read(readBuffer);
             
             if (bytesRead == -1) {
@@ -155,8 +154,9 @@ public class ClientSession {
             // 处理剩余数据
             if (readBuffer.hasRemaining()) {
                 processMessage();
+            } else {
+                readBuffer.clear();
             }
-            
         } catch (Exception e) {
             logger.error("处理消息失败: {}", clientId, e);
         }
