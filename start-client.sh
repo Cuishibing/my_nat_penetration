@@ -3,19 +3,20 @@
 # NAT穿透客户端启动脚本
 
 # 检查参数
-if [ $# -lt 3 ]; then
-    echo "用法: $0 <clientId> <localHost> <localPort>"
-    echo "示例: $0 client1 localhost 8080"
+if [ $# -lt 1 ]; then
+    echo "用法: $0 <服务器地址> [服务器端口] [本地端口]"
+    echo "示例: $0 192.168.1.100 8080 8082"
+    echo "默认值: localhost:8080 -> localhost:8082"
     exit 1
 fi
 
-CLIENT_ID=$1
-LOCAL_HOST=$2
-LOCAL_PORT=$3
+SERVER_HOST=$1
+SERVER_PORT=${2:-8080}  # 默认服务器端口8080
+LOCAL_PORT=${3:-8082}    # 默认本地端口8082
 
 echo "启动NAT穿透客户端..."
-echo "客户端ID: $CLIENT_ID"
-echo "本地服务: $LOCAL_HOST:$LOCAL_PORT"
+echo "服务器地址: $SERVER_HOST:$SERVER_PORT"
+echo "本地端口: $LOCAL_PORT"
 
 # 检查Java是否安装
 if ! command -v java &> /dev/null; then
@@ -47,4 +48,4 @@ fi
 
 # 启动客户端
 echo "启动客户端..."
-mvn exec:java -Dexec.mainClass="com.natpenetration.client.NatClient" -Dexec.args="$CLIENT_ID $LOCAL_HOST $LOCAL_PORT"
+mvn exec:java -Dexec.mainClass="com.natpenetration.client.NatClient" -Dexec.args="$SERVER_HOST $SERVER_PORT $LOCAL_PORT"

@@ -410,7 +410,43 @@ public class NatClient {
      * 主方法
      */
     public static void main(String[] args) {
-        NatClient client = new NatClient();
+        String serverHost = Config.SERVER_HOST;
+        int serverPort = Config.SERVER_PORT;
+        int localPort = Config.LOCAL_SERVICE_PORT;
+        
+        // 解析命令行参数
+        if (args.length >= 1) {
+            serverHost = args[0];
+        }
+        if (args.length >= 2) {
+            try {
+                serverPort = Integer.parseInt(args[1]);
+            } catch (NumberFormatException e) {
+                System.err.println("错误: 服务器端口必须是数字");
+                System.exit(1);
+            }
+        }
+        if (args.length >= 3) {
+            try {
+                localPort = Integer.parseInt(args[2]);
+            } catch (NumberFormatException e) {
+                System.err.println("错误: 本地端口必须是数字");
+                System.exit(1);
+            }
+        }
+        
+        // 显示使用说明
+        if (args.length == 0) {
+            System.out.println("用法: java NatClient [服务器地址] [服务器端口] [本地端口]");
+            System.out.println("示例: java NatClient 192.168.1.100 8080 8082");
+            System.out.println("默认值: " + Config.SERVER_HOST + ":" + Config.SERVER_PORT + " -> localhost:" + Config.LOCAL_SERVICE_PORT);
+        }
+        
+        System.out.println("启动NAT穿透客户端...");
+        System.out.println("服务器地址: " + serverHost + ":" + serverPort);
+        System.out.println("本地端口: " + localPort);
+        
+        NatClient client = new NatClient(serverHost, serverPort, localPort);
         
         // 添加关闭钩子
         Runtime.getRuntime().addShutdownHook(new Thread(client::stop));
