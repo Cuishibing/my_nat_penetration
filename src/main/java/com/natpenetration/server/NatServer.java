@@ -24,7 +24,6 @@ public class NatServer {
     private static final Logger logger = LoggerFactory.getLogger(NatServer.class);
     
     private final int serverPort;
-    private final int tunnelPort;
     private final ConcurrentHashMap<String, ClientSession> clients;
     private final ConcurrentHashMap<String, TunnelSession> tunnels;
     
@@ -33,14 +32,16 @@ public class NatServer {
     private ServerSocketChannel tunnelChannel;
     private ScheduledExecutorService scheduler;
     private volatile boolean running = false;
+
+    private final int MIN_TUNNEL_PORT = 8090;
+    private final int MAX_TUNNEL_PORT = 8999;
     
     public NatServer() {
-        this(Config.SERVER_PORT, Config.TUNNEL_PORT);
+        this(Config.SERVER_PORT);
     }
     
-    public NatServer(int serverPort, int tunnelPort) {
+    public NatServer(int serverPort) {
         this.serverPort = serverPort;
-        this.tunnelPort = tunnelPort;
         this.clients = new ConcurrentHashMap<>();
         this.tunnels = new ConcurrentHashMap<>();
     }
@@ -61,9 +62,6 @@ public class NatServer {
             // 启动客户端连接监听
             startClientListener();
             
-            // 启动隧道监听
-            startTunnelListener();
-            
             // 启动心跳调度器
             scheduler = Executors.newScheduledThreadPool(1);
             scheduler.scheduleAtFixedRate(this::sendHeartbeat, 0, Config.HEARTBEAT_INTERVAL, TimeUnit.MILLISECONDS);
@@ -71,7 +69,6 @@ public class NatServer {
             running = true;
             logger.info("NAT穿透服务端启动成功");
             logger.info("客户端连接端口: {}", serverPort);
-            logger.info("隧道端口: {}", tunnelPort);
             
             // 主事件循环
             eventLoop();
@@ -96,7 +93,7 @@ public class NatServer {
     /**
      * 启动隧道监听
      */
-    private void startTunnelListener() throws IOException {
+    private void startTunnelListener(int tunnelPort) throws IOException {
         tunnelChannel = ServerSocketChannel.open();
         tunnelChannel.configureBlocking(false);
         tunnelChannel.socket().bind(new InetSocketAddress(tunnelPort));
@@ -198,12 +195,13 @@ public class NatServer {
      * 发送心跳
      */
     private void sendHeartbeat() {
-        Message heartbeat = new Message(Message.Type.HEARTBEAT, null, null, null);
-        ByteBuffer buffer = heartbeat.toByteBuffer();
+
         
         clients.values().forEach(client -> {
             try {
-                client.sendMessage(buffer.duplicate());
+                Message heartbeat = new Message(Message.Type.HEARTBEAT, client.getClientId(), null, null);
+                ByteBuffer buffer = heartbeat.toByteBuffer();
+                client.sendMessage(buffer);
             } catch (IOException e) {
                 logger.error("发送心跳失败: {}", client.getClientId(), e);
             }

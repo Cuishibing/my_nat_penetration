@@ -1,4 +1,4 @@
-package com.natpenetration.server;
+package com.natpenetration.client;
 
 import com.natpenetration.common.Config;
 import com.natpenetration.common.Message;
@@ -8,29 +8,29 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.SocketChannel;
-import java.util.concurrent.ConcurrentLinkedQueue;
 import java.nio.channels.SelectionKey;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 /**
- * 客户端会话
- * 处理客户端连接和消息传输
+ * 服务器会话
+ * 处理与服务器的连接和消息传输
  */
-public class ClientSession {
+public class ServerSession {
     
-    private static final Logger logger = LoggerFactory.getLogger(ClientSession.class);
+    private static final Logger logger = LoggerFactory.getLogger(ServerSession.class);
     
     private final String clientId;
     private final SocketChannel channel;
-    private final NatServer server;
+    private final NatClient client;
     private final ConcurrentLinkedQueue<ByteBuffer> writeQueue;
     
     private ByteBuffer readBuffer;
     private volatile boolean connected = true;
     
-    public ClientSession(String clientId, SocketChannel channel, NatServer server) {
+    public ServerSession(String clientId, SocketChannel channel, NatClient client) {
         this.clientId = clientId;
         this.channel = channel;
-        this.server = server;
+        this.client = client;
         this.writeQueue = new ConcurrentLinkedQueue<>();
         this.readBuffer = ByteBuffer.allocate(Config.BUFFER_SIZE);
     }
@@ -58,7 +58,7 @@ public class ClientSession {
             }
             
         } catch (IOException e) {
-            logger.error("读取客户端数据失败: {}", clientId, e);
+            logger.error("读取服务器数据失败: {}", clientId, e);
             close();
         }
     }
@@ -89,11 +89,11 @@ public class ClientSession {
             
             // 如果没有更多数据要写，取消写事件监听
             if (writeQueue.isEmpty()) {
-                channel.keyFor(server.getSelector()).interestOps(SelectionKey.OP_READ);
+                channel.keyFor(client.getSelector()).interestOps(SelectionKey.OP_READ);
             }
             
         } catch (IOException e) {
-            logger.error("写入客户端数据失败: {}", clientId, e);
+            logger.error("写入服务器数据失败: {}", clientId, e);
             close();
         }
     }
@@ -167,9 +167,6 @@ public class ClientSession {
             case HEARTBEAT:
                 handleHeartbeat(message);
                 break;
-            case TUNNEL_REQUEST:
-                handleTunnelRequest(message);
-                break;
             case DATA:
                 handleData(message);
                 break;
@@ -182,53 +179,34 @@ public class ClientSession {
      * 处理注册消息
      */
     private void handleRegister(Message message) {
-        logger.info("客户端 {} 注册成功", clientId);
-        // 发送注册确认
-        try {
-            Message response = new Message(Message.Type.REGISTER, clientId, null, "OK".getBytes());
-            sendMessage(response.toByteBuffer());
-        } catch (IOException e) {
-            logger.error("发送注册确认失败: {}", clientId, e);
-        }
+        logger.info("注册确认: {}", new String(message.getData()));
     }
     
     /**
      * 处理心跳消息
      */
     private void handleHeartbeat(Message message) {
-        // 心跳确认
-        try {
-            Message response = new Message(Message.Type.HEARTBEAT, clientId, null, null);
-            sendMessage(response.toByteBuffer());
-        } catch (IOException e) {
-            logger.error("发送心跳确认失败: {}", clientId, e);
-        }
-    }
-    
-    /**
-     * 处理隧道请求
-     */
-    private void handleTunnelRequest(Message message) {
-        String tunnelId = message.getTunnelId();
-        if (tunnelId != null) {
-            TunnelSession tunnel = server.getTunnel(tunnelId);
-            if (tunnel != null) {
-                // 转发数据到隧道
-                tunnel.forwardToClient(message.getData());
-            }
-        }
+        logger.debug("收到心跳确认：msg {}", message);
     }
     
     /**
      * 处理数据消息
      */
     private void handleData(Message message) {
-        String tunnelId = message.getTunnelId();
-        if (tunnelId != null) {
-            TunnelSession tunnel = server.getTunnel(tunnelId);
-            if (tunnel != null) {
-                // 转发数据到隧道
-                tunnel.forwardToClient(message.getData());
+        // 转发数据到本地连接
+        if (message.getData() != null) {
+            String tunnelId = message.getTunnelId();
+            if (tunnelId != null) {
+                // 根据tunnelId找到对应的本地连接
+                LocalSession localSession = client.getLocalSession(tunnelId);
+                if (localSession != null && localSession.isConnected()) {
+                    localSession.forwardToLocal(message.getData());
+                    logger.debug("已转发数据到隧道 {}，数据长度: {}", tunnelId, message.getData().length);
+                } else {
+                    logger.warn("隧道 {} 不存在或已断开", tunnelId);
+                }
+            } else {
+                logger.warn("收到数据消息但缺少tunnelId");
             }
         }
     }
@@ -244,18 +222,42 @@ public class ClientSession {
         writeQueue.offer(buffer.duplicate());
         
         // 注册写事件监听
-        channel.keyFor(server.getSelector()).interestOps(SelectionKey.OP_READ | SelectionKey.OP_WRITE);
+        channel.keyFor(client.getSelector()).interestOps(SelectionKey.OP_READ | SelectionKey.OP_WRITE);
     }
     
     /**
-     * 转发数据到客户端
+     * 发送心跳
      */
-    public void forwardToClient(byte[] data) {
+    public void sendHeartbeat() {
         try {
-            Message message = new Message(Message.Type.DATA, clientId, null, data);
+            Message heartbeat = new Message(Message.Type.HEARTBEAT, clientId, null, null);
+            sendMessage(heartbeat.toByteBuffer());
+        } catch (IOException e) {
+            logger.error("发送心跳失败", e);
+        }
+    }
+    
+    /**
+     * 发送注册消息
+     */
+    public void sendRegister() {
+        try {
+            Message registerMessage = new Message(Message.Type.REGISTER, clientId, null, null);
+            sendMessage(registerMessage.toByteBuffer());
+            logger.info("已发送注册消息");
+        } catch (IOException e) {
+            logger.error("发送注册消息失败", e);
+        }
+    }
+    
+    /**
+     * 转发数据到服务器
+     */
+    public void forwardToServer(Message message) {
+        try {
             sendMessage(message.toByteBuffer());
         } catch (Exception e) {
-            logger.error("转发数据到客户端失败: {}", clientId, e);
+            logger.error("转发数据到服务器失败", e);
             close();
         }
     }
@@ -269,17 +271,17 @@ public class ClientSession {
         }
         
         connected = false;
-        logger.info("关闭客户端连接: {}", clientId);
+        logger.info("关闭服务器连接: {}", clientId);
         
         try {
             if (channel != null) {
                 channel.close();
             }
         } catch (IOException e) {
-            logger.error("关闭客户端连接失败: {}", clientId, e);
+            logger.error("关闭服务器连接失败: {}", clientId, e);
         }
         
-        server.removeClient(clientId);
+        client.stop();
     }
     
     // Getters

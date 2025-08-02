@@ -6,13 +6,12 @@ package com.natpenetration.common;
 public class Config {
     // 服务端配置
     public static final int SERVER_PORT = 8080;           // 服务端监听端口
-    public static final int TUNNEL_PORT = 8081;           // 隧道端口
     
     // 客户端配置
     public static final int LOCAL_SERVICE_PORT = 8082;     // 本地服务端口
     
     // 缓冲区配置
-    public static final int BUFFER_SIZE = 8192;           // 缓冲区大小
+    public static final int BUFFER_SIZE = 8192;           // 缓冲区大小，8KB
     
     // 连接配置
     public static final int CONNECTION_TIMEOUT = 30000;   // 连接超时时间(毫秒)

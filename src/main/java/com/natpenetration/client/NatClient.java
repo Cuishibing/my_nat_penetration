@@ -10,6 +10,7 @@ import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.*;
 import java.util.Iterator;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -28,13 +29,15 @@ public class NatClient {
     private final String clientId;
     
     private Selector selector;
-    private SocketChannel serverChannel;
     private ServerSocketChannel localChannel;
     private ScheduledExecutorService scheduler;
     private volatile boolean running = false;
     
-    // 隧道映射：tunnelId -> LocalConnectionHandler
-    private final java.util.concurrent.ConcurrentHashMap<String, LocalConnectionHandler> tunnelMapping;
+    // 服务器会话
+    private ServerSession serverSession;
+    
+    // 本地会话映射：tunnelId -> LocalSession
+    private final ConcurrentHashMap<String, LocalSession> localSessionMapping;
     
     public NatClient() {
         this(Config.SERVER_HOST, Config.SERVER_PORT, Config.LOCAL_SERVICE_PORT);
@@ -45,7 +48,7 @@ public class NatClient {
         this.serverPort = serverPort;
         this.localPort = localPort;
         this.clientId = "client_" + System.currentTimeMillis();
-        this.tunnelMapping = new java.util.concurrent.ConcurrentHashMap<>();
+        this.localSessionMapping = new ConcurrentHashMap<>();
     }
     
     /**
@@ -89,7 +92,7 @@ public class NatClient {
      * 连接到服务器
      */
     private void connectToServer() throws IOException {
-        serverChannel = SocketChannel.open();
+        SocketChannel serverChannel = SocketChannel.open();
         serverChannel.configureBlocking(false);
         serverChannel.connect(new InetSocketAddress(serverHost, serverPort));
         
@@ -103,11 +106,13 @@ public class NatClient {
             }
         }
         
-        serverChannel.register(selector, SelectionKey.OP_READ);
+        // 创建服务器会话
+        serverSession = new ServerSession(clientId, serverChannel, this);
+        serverChannel.register(selector, SelectionKey.OP_READ, serverSession);
         logger.info("已连接到服务器: {}:{}", serverHost, serverPort);
         
         // 发送注册消息
-        sendRegisterMessage();
+        serverSession.sendRegister();
     }
     
     /**
@@ -121,19 +126,7 @@ public class NatClient {
         logger.info("开始监听本地服务，端口: {}", localPort);
     }
     
-    /**
-     * 发送注册消息
-     */
-    private void sendRegisterMessage() {
-        try {
-            Message registerMessage = new Message(Message.Type.REGISTER, clientId, null, null);
-            ByteBuffer buffer = registerMessage.toByteBuffer();
-            serverChannel.write(buffer);
-            logger.info("已发送注册消息");
-        } catch (IOException e) {
-            logger.error("发送注册消息失败", e);
-        }
-    }
+
     
     /**
      * 主事件循环
@@ -182,12 +175,12 @@ public class NatClient {
         // 为本地连接分配tunnelId
         String tunnelId = "tunnel_" + System.currentTimeMillis() + "_" + clientChannel.hashCode();
         
-        // 创建本地连接处理器
-        LocalConnectionHandler localHandler = new LocalConnectionHandler(clientChannel, this, tunnelId);
-        clientChannel.register(selector, SelectionKey.OP_READ, localHandler);
+        // 创建本地会话
+        LocalSession localSession = new LocalSession(tunnelId, clientChannel, this);
+        clientChannel.register(selector, SelectionKey.OP_READ, localSession);
         
-        // 添加到隧道映射
-        tunnelMapping.put(tunnelId, localHandler);
+        // 添加到本地会话映射
+        localSessionMapping.put(tunnelId, localSession);
         
         logger.info("新的本地连接: {} -> tunnelId: {}", clientChannel.getRemoteAddress(), tunnelId);
     }
@@ -198,10 +191,10 @@ public class NatClient {
     private void handleRead(SelectionKey key) throws IOException {
         Object attachment = key.attachment();
         
-        if (attachment instanceof LocalConnectionHandler) {
-            ((LocalConnectionHandler) attachment).handleRead();
-        } else if (key.channel() == serverChannel) {
-            handleServerRead();
+        if (attachment instanceof LocalSession) {
+            ((LocalSession) attachment).handleRead();
+        } else if (attachment instanceof ServerSession) {
+            ((ServerSession) attachment).handleRead();
         }
     }
     
@@ -211,143 +204,21 @@ public class NatClient {
     private void handleWrite(SelectionKey key) throws IOException {
         Object attachment = key.attachment();
         
-        if (attachment instanceof LocalConnectionHandler) {
-            ((LocalConnectionHandler) attachment).handleWrite();
+        if (attachment instanceof LocalSession) {
+            ((LocalSession) attachment).handleWrite();
+        } else if (attachment instanceof ServerSession) {
+            ((ServerSession) attachment).handleWrite();
         }
     }
     
-    /**
-     * 处理服务器读事件
-     */
-    private void handleServerRead() throws IOException {
-        ByteBuffer buffer = ByteBuffer.allocate(Config.BUFFER_SIZE);
-        int bytesRead = serverChannel.read(buffer);
-        
-        if (bytesRead == -1) {
-            // 连接已关闭
-            logger.error("服务器连接已断开");
-            stop();
-            return;
-        }
-        
-        if (bytesRead > 0) {
-            buffer.flip();
-            processServerMessage(buffer);
-        }
-    }
-    
-    /**
-     * 处理服务器消息
-     */
-    private void processServerMessage(ByteBuffer buffer) {
-        try {
-            // 确保有足够的数据读取消息头
-            if (buffer.remaining() < 16) {
-                return;
-            }
-            
-            // 标记当前位置
-            buffer.mark();
-            
-            // 读取消息头
-            int type = buffer.getInt();
-            int clientIdLength = buffer.getInt();
-            int tunnelIdLength = buffer.getInt();
-            int dataLength = buffer.getInt();
-            
-            // 检查是否有完整的消息
-            int totalLength = 16 + clientIdLength + tunnelIdLength + dataLength;
-            if (buffer.remaining() < totalLength - 16) {
-                buffer.reset();
-                return;
-            }
-            
-            // 创建消息
-            Message message = new Message();
-            message.setType(Message.Type.fromValue(type));
-            
-            if (clientIdLength > 0) {
-                byte[] clientIdBytes = new byte[clientIdLength];
-                buffer.get(clientIdBytes);
-                message.setClientId(new String(clientIdBytes));
-            }
-            
-            if (tunnelIdLength > 0) {
-                byte[] tunnelIdBytes = new byte[tunnelIdLength];
-                buffer.get(tunnelIdBytes);
-                message.setTunnelId(new String(tunnelIdBytes));
-            }
-            
-            if (dataLength > 0) {
-                byte[] data = new byte[dataLength];
-                buffer.get(data);
-                message.setData(data);
-            }
-            
-            // 处理消息
-            handleServerMessage(message);
-            
-            // 处理剩余数据
-            if (buffer.hasRemaining()) {
-                processServerMessage(buffer);
-            }
-            
-        } catch (Exception e) {
-            logger.error("处理服务器消息失败", e);
-        }
-    }
-    
-    /**
-     * 处理不同类型的服务器消息
-     */
-    private void handleServerMessage(Message message) {
-        switch (message.getType()) {
-            case REGISTER:
-                logger.info("注册确认: {}", new String(message.getData()));
-                break;
-            case HEARTBEAT:
-                logger.debug("收到心跳");
-                break;
-            case DATA:
-                handleDataMessage(message);
-                break;
-            default:
-                logger.warn("未知消息类型: {}", message.getType());
-        }
-    }
-    
-    /**
-     * 处理数据消息
-     */
-    private void handleDataMessage(Message message) {
-        // 转发数据到本地连接
-        if (message.getData() != null) {
-            String tunnelId = message.getTunnelId();
-            if (tunnelId != null) {
-                // 根据tunnelId找到对应的本地连接
-                LocalConnectionHandler handler = tunnelMapping.get(tunnelId);
-                if (handler != null && handler.isConnected()) {
-                    handler.forwardToLocal(message.getData());
-                    logger.debug("已转发数据到隧道 {}，数据长度: {}", tunnelId, message.getData().length);
-                } else {
-                    logger.warn("隧道 {} 不存在或已断开", tunnelId);
-                }
-            } else {
-                logger.warn("收到数据消息但缺少tunnelId");
-            }
-        }
-    }
+
     
     /**
      * 发送心跳
      */
     private void sendHeartbeat() {
-        try {
-            Message heartbeat = new Message(Message.Type.HEARTBEAT, clientId, null, null);
-            ByteBuffer buffer = heartbeat.toByteBuffer();
-            serverChannel.write(buffer);
-        } catch (IOException e) {
-            logger.error("发送心跳失败", e);
+        if (serverSession != null && serverSession.isConnected()) {
+            serverSession.sendHeartbeat();
         }
     }
     
@@ -367,13 +238,15 @@ public class NatClient {
             scheduler.shutdown();
         }
         
+        // 关闭服务器会话
+        if (serverSession != null) {
+            serverSession.close();
+        }
+        
         // 关闭选择器
         try {
             if (selector != null) {
                 selector.close();
-            }
-            if (serverChannel != null) {
-                serverChannel.close();
             }
             if (localChannel != null) {
                 localChannel.close();
@@ -390,8 +263,8 @@ public class NatClient {
         return clientId;
     }
     
-    public SocketChannel getServerChannel() {
-        return serverChannel;
+    public ServerSession getServerSession() {
+        return serverSession;
     }
     
     public Selector getSelector() {
@@ -399,11 +272,18 @@ public class NatClient {
     }
     
     /**
-     * 移除隧道映射
+     * 获取本地会话
      */
-    public void removeTunnelMapping(String tunnelId) {
-        tunnelMapping.remove(tunnelId);
-        logger.debug("已移除隧道映射: {}", tunnelId);
+    public LocalSession getLocalSession(String tunnelId) {
+        return localSessionMapping.get(tunnelId);
+    }
+    
+    /**
+     * 移除本地会话映射
+     */
+    public void removeLocalSession(String tunnelId) {
+        localSessionMapping.remove(tunnelId);
+        logger.debug("已移除本地会话映射: {}", tunnelId);
     }
     
     /**

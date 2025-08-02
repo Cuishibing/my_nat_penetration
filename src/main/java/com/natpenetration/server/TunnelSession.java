@@ -23,7 +23,6 @@ public class TunnelSession {
     private final ConcurrentLinkedQueue<ByteBuffer> writeQueue;
     
     private ByteBuffer readBuffer;
-    private ByteBuffer writeBuffer;
     private volatile boolean connected = true;
     
     public TunnelSession(String tunnelId, SocketChannel channel, NatServer server) {
@@ -32,7 +31,6 @@ public class TunnelSession {
         this.server = server;
         this.writeQueue = new ConcurrentLinkedQueue<>();
         this.readBuffer = ByteBuffer.allocate(Config.BUFFER_SIZE);
-        this.writeBuffer = ByteBuffer.allocate(Config.BUFFER_SIZE);
     }
     
     /**

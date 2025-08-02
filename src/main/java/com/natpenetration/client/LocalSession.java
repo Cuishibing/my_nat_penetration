@@ -8,28 +8,29 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.SocketChannel;
+import java.nio.channels.SelectionKey;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
 /**
- * 本地连接处理器
- * 处理本地连接的数据传输
+ * 本地会话
+ * 处理本地连接和数据传输
  */
-public class LocalConnectionHandler {
+public class LocalSession {
     
-    private static final Logger logger = LoggerFactory.getLogger(LocalConnectionHandler.class);
+    private static final Logger logger = LoggerFactory.getLogger(LocalSession.class);
     
+    private final String tunnelId;
     private final SocketChannel channel;
     private final NatClient client;
-    private final String tunnelId;
     private final ConcurrentLinkedQueue<ByteBuffer> writeQueue;
     
     private ByteBuffer readBuffer;
     private volatile boolean connected = true;
     
-    public LocalConnectionHandler(SocketChannel channel, NatClient client, String tunnelId) {
+    public LocalSession(String tunnelId, SocketChannel channel, NatClient client) {
+        this.tunnelId = tunnelId;
         this.channel = channel;
         this.client = client;
-        this.tunnelId = tunnelId;
         this.writeQueue = new ConcurrentLinkedQueue<>();
         this.readBuffer = ByteBuffer.allocate(Config.BUFFER_SIZE);
     }
@@ -59,7 +60,7 @@ public class LocalConnectionHandler {
             }
             
         } catch (IOException e) {
-            logger.error("读取本地连接数据失败", e);
+            logger.error("读取本地连接数据失败: {}", tunnelId, e);
             close();
         }
     }
@@ -90,11 +91,11 @@ public class LocalConnectionHandler {
             
             // 如果没有更多数据要写，取消写事件监听
             if (writeQueue.isEmpty()) {
-                channel.keyFor(client.getSelector()).interestOps(java.nio.channels.SelectionKey.OP_READ);
+                channel.keyFor(client.getSelector()).interestOps(SelectionKey.OP_READ);
             }
             
         } catch (IOException e) {
-            logger.error("写入本地连接数据失败", e);
+            logger.error("写入本地连接数据失败: {}", tunnelId, e);
             close();
         }
     }
@@ -103,19 +104,13 @@ public class LocalConnectionHandler {
      * 转发数据到服务器
      */
     private void forwardToServer() {
-        try {
-            byte[] data = new byte[readBuffer.remaining()];
-            readBuffer.get(data);
-            
-            // 创建数据消息并发送到服务器，包含tunnelId
-            Message message = new Message(Message.Type.DATA, client.getClientId(), tunnelId, data);
-            ByteBuffer buffer = message.toByteBuffer();
-            client.getServerChannel().write(buffer);
-            
-        } catch (IOException e) {
-            logger.error("转发数据到服务器失败", e);
-            close();
-        }
+        byte[] data = new byte[readBuffer.remaining()];
+        readBuffer.get(data);
+
+        // 创建数据消息并发送到服务器，包含tunnelId
+        Message message = new Message(Message.Type.DATA, client.getClientId(), tunnelId, data);
+        client.getServerSession().forwardToServer(message);
+
     }
     
     /**
@@ -127,10 +122,10 @@ public class LocalConnectionHandler {
             writeQueue.offer(buffer);
             
             // 注册写事件监听
-            channel.keyFor(client.getSelector()).interestOps(java.nio.channels.SelectionKey.OP_READ | java.nio.channels.SelectionKey.OP_WRITE);
+            channel.keyFor(client.getSelector()).interestOps(SelectionKey.OP_READ | SelectionKey.OP_WRITE);
             
         } catch (Exception e) {
-            logger.error("转发数据到本地连接失败", e);
+            logger.error("转发数据到本地连接失败: {}", tunnelId, e);
             close();
         }
     }
@@ -155,14 +150,18 @@ public class LocalConnectionHandler {
                 channel.close();
             }
         } catch (IOException e) {
-            logger.error("关闭本地连接失败", e);
+            logger.error("关闭本地连接失败: {}", tunnelId, e);
         }
         
         // 从隧道映射中移除
-        client.removeTunnelMapping(tunnelId);
+        client.removeLocalSession(tunnelId);
     }
     
     // Getters
+    public String getTunnelId() {
+        return tunnelId;
+    }
+    
     public SocketChannel getChannel() {
         return channel;
     }
