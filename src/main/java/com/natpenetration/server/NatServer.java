@@ -225,6 +225,10 @@ public class NatServer {
     }
 
     public void sendClientMessage(Message msg) throws IOException {
+        if (clientSession == null) {
+            logger.warn("尝试发送消息但客户端会话未连接: {}", msg.getType());
+            return;
+        }
         clientSession.sendMessage(msg.toByteBuffer());
     }
 
@@ -232,6 +236,10 @@ public class NatServer {
      * 发送心跳
      */
     private void sendHeartbeat() {
+        if (clientSession == null) {
+            logger.debug("跳过心跳发送，客户端会话未连接");
+            return;
+        }
         try {
             Message heartbeat = new Message(Message.Type.HEARTBEAT, clientSession.getClientId(), null, null);
             ByteBuffer buffer = heartbeat.toByteBuffer();
