@@ -105,8 +105,8 @@ public class NatClient {
 
         // 创建服务器会话
         serverSession = new ServerSession(clientId, serverChannel, this);
-        serverChannel.register(selector, SelectionKey.OP_READ, serverSession);
-        serverChannel.register(selector, SelectionKey.OP_WRITE, serverSession);
+        // 修复：在一个register调用中指定多个操作
+        serverChannel.register(selector, SelectionKey.OP_READ | SelectionKey.OP_WRITE, serverSession);
         logger.info("已连接到服务器: {}:{}", serverHost, serverPort);
 
         // 发送注册消息
@@ -119,20 +119,44 @@ public class NatClient {
      * 启动本地服务监听
      */
     public void connectToLocalServer(int remoteDataPort) throws IOException {
+        // 修复：连接到本地已有的HTTP服务
         SocketChannel localSocketChannel = SocketChannel.open();
         localSocketChannel.configureBlocking(false);
-        localSocketChannel.socket().bind(new InetSocketAddress(localPort));
+        // 连接到本地已有的HTTP服务，而不是绑定端口
+        localSocketChannel.connect(new InetSocketAddress("localhost", localPort));
+        
+        // 等待连接完成
+        while (!localSocketChannel.finishConnect()) {
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("连接被中断", e);
+            }
+        }
 
         SocketChannel remoteSocketChannel = SocketChannel.open();
-        localSocketChannel.configureBlocking(false);
-        localSocketChannel.socket().bind(new InetSocketAddress(remoteDataPort));
-
+        remoteSocketChannel.configureBlocking(false);
+        // 连接到远程服务器
+        remoteSocketChannel.connect(new InetSocketAddress(serverHost, remoteDataPort));
+        
+        // 等待连接完成
+        while (!remoteSocketChannel.finishConnect()) {
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("连接被中断", e);
+            }
+        }
 
         LocalSession localSession = new LocalSession("tunnel_" + System.currentTimeMillis(), localSocketChannel, remoteSocketChannel, this);
         localSessionMapping.put(localSession.getTunnelId(), localSession);
 
         localSocketChannel.register(selector, SelectionKey.OP_READ | SelectionKey.OP_WRITE, new SelectionKeyForLocalSession(localSession, 1));
         remoteSocketChannel.register(selector, SelectionKey.OP_READ | SelectionKey.OP_WRITE, new SelectionKeyForLocalSession(localSession, 2));
+        
+        logger.info("已连接到本地服务 localhost:{} 和远程服务器 {}:{}", localPort, serverHost, remoteDataPort);
     }
 
 

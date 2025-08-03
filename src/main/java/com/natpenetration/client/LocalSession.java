@@ -24,6 +24,10 @@ public class LocalSession {
     private final ConcurrentLinkedQueue<ByteBuffer> writeLocalQueue;
     private final ConcurrentLinkedQueue<ByteBuffer> writeRemoteQueue;
 
+    // 修复：重用ByteBuffer
+    private final ByteBuffer localReadBuffer;
+    private final ByteBuffer remoteReadBuffer;
+
     private volatile boolean connected = true;
 
     public LocalSession(String tunnelId, SocketChannel localDataChannel, SocketChannel remoteDataChannel, NatClient client) {
@@ -33,45 +37,44 @@ public class LocalSession {
         this.client = client;
         this.writeLocalQueue = new ConcurrentLinkedQueue<>();
         this.writeRemoteQueue = new ConcurrentLinkedQueue<>();
+        // 修复：初始化可重用的ByteBuffer
+        this.localReadBuffer = ByteBuffer.allocate(Config.BUFFER_SIZE);
+        this.remoteReadBuffer = ByteBuffer.allocate(Config.BUFFER_SIZE);
     }
 
     /**
-     * 处理读事件
+     * 处理本地读事件
      */
     public void handleLocalRead() {
         if (!connected) {
             return;
         }
-        while (true) {
-            try {
-                ByteBuffer buffer = ByteBuffer.allocate(Config.BUFFER_SIZE);
-                int bytesRead = localDataChannel.read(buffer);
+        
+        try {
+            // 修复：重用ByteBuffer
+            localReadBuffer.clear();
+            int bytesRead = localDataChannel.read(localReadBuffer);
 
-                if (bytesRead == -1) {
-                    // 连接已关闭
-                    close();
-                    return;
-                }
-
-                if (bytesRead == 0) {
-                    return;
-                }
-
-                if (bytesRead > 0) {
-                    buffer.flip();
-                    // 转发数据到服务器
-                    writeRemoteQueue.offer(buffer);
-                }
-
-            } catch (IOException e) {
-                logger.error("读取本地连接数据失败: {}", tunnelId, e);
+            if (bytesRead == -1) {
+                // 连接已关闭
                 close();
+                return;
             }
+
+            if (bytesRead > 0) {
+                localReadBuffer.flip();
+                // 转发数据到远程服务器
+                writeRemoteQueue.offer(localReadBuffer.duplicate());
+            }
+
+        } catch (IOException e) {
+            logger.error("读取本地连接数据失败: {}", tunnelId, e);
+            close();
         }
     }
 
     /**
-     * 处理写事件
+     * 处理本地写事件
      */
     public void handleLocalWrite() {
         if (!connected) {
@@ -100,43 +103,38 @@ public class LocalSession {
     }
 
     /**
-     * 处理读事件
+     * 处理远程读事件
      */
     public void handleRemoteRead() {
         if (!connected) {
             return;
         }
 
-        while (true) {
-            try {
-                ByteBuffer buffer = ByteBuffer.allocate(Config.BUFFER_SIZE);
-                int bytesRead = localDataChannel.read(buffer);
+        try {
+            // 修复：重用ByteBuffer并读取正确的channel
+            remoteReadBuffer.clear();
+            int bytesRead = remoteDataChannel.read(remoteReadBuffer);
 
-                if (bytesRead == -1) {
-                    // 连接已关闭
-                    close();
-                    return;
-                }
-
-                if (bytesRead == 0) {
-                    return;
-                }
-
-                if (bytesRead > 0) {
-                    buffer.flip();
-                    // 转发数据到服务器
-                    writeLocalQueue.offer(buffer);
-                }
-
-            } catch (IOException e) {
-                logger.error("读取本地连接数据失败: {}", tunnelId, e);
+            if (bytesRead == -1) {
+                // 连接已关闭
                 close();
+                return;
             }
+
+            if (bytesRead > 0) {
+                remoteReadBuffer.flip();
+                // 转发数据到本地
+                writeLocalQueue.offer(remoteReadBuffer.duplicate());
+            }
+
+        } catch (IOException e) {
+            logger.error("读取远程连接数据失败: {}", tunnelId, e);
+            close();
         }
     }
 
     /**
-     * 处理写事件
+     * 处理远程写事件
      */
     public void handleRemoteWrite() {
         if (!connected) {
@@ -148,7 +146,7 @@ public class LocalSession {
             while (!writeRemoteQueue.isEmpty()) {
                 ByteBuffer buffer = writeRemoteQueue.peek();
 
-                int bytesWritten = localDataChannel.write(buffer);
+                int bytesWritten = remoteDataChannel.write(buffer);
                 if (bytesWritten == 0) {
                     // 缓冲区已满，等待下次写事件
                     break;
@@ -159,7 +157,7 @@ public class LocalSession {
                 }
             }
         } catch (IOException e) {
-            logger.error("写入本地连接数据失败: {}", tunnelId, e);
+            logger.error("写入远程连接数据失败: {}", tunnelId, e);
             close();
         }
     }
@@ -180,6 +178,13 @@ public class LocalSession {
         }
 
         try {
+            // 修复：清理SelectionKey
+            if (localDataChannel != null && localDataChannel.isRegistered()) {
+                localDataChannel.keyFor(client.getSelector()).cancel();
+            }
+            if (remoteDataChannel != null && remoteDataChannel.isRegistered()) {
+                remoteDataChannel.keyFor(client.getSelector()).cancel();
+            }
             if (localDataChannel != null) {
                 localDataChannel.close();
             }

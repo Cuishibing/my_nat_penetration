@@ -7,7 +7,6 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.nio.channels.SelectionKey;
 import java.nio.channels.SocketChannel;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
@@ -163,13 +162,16 @@ public class ServerSession {
                 break;
             case HEARTBEAT:
                 handleHeartbeat(message);
+                break;
             case TUNNEL_OPEN: {
                 int remoteDataPort = Integer.parseInt(new String(message.getData()));
                 logger.info("收到 TUNNEL_OPEN 消息， 端口为:{}", remoteDataPort);
                 try {
                     client.connectToLocalServer(remoteDataPort);
                 } catch (IOException e) {
-                    throw new RuntimeException(e);
+                    logger.error("连接到本地服务失败，端口: {}, 错误: {}", remoteDataPort, e.getMessage());
+                    // 不要抛出RuntimeException，而是记录错误并继续
+                    // 这样可以避免客户端因为连接失败而完全停止
                 }
             }
             break;
@@ -240,6 +242,10 @@ public class ServerSession {
         logger.info("关闭服务器连接: {}", clientId);
 
         try {
+            // 修复：清理SelectionKey
+            if (channel != null && channel.isRegistered()) {
+                channel.keyFor(client.getSelector()).cancel();
+            }
             if (channel != null) {
                 channel.close();
             }

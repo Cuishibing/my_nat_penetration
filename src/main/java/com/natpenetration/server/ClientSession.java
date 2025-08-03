@@ -217,6 +217,10 @@ public class ClientSession {
         logger.info("关闭客户端连接: {}", clientId);
         
         try {
+            // 修复：清理SelectionKey
+            if (channel != null && channel.isRegistered()) {
+                channel.keyFor(server.getSelector()).cancel();
+            }
             if (channel != null) {
                 channel.close();
             }
