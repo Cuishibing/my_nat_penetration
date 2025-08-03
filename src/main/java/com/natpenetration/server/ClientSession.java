@@ -86,12 +86,6 @@ public class ClientSession {
                     writeQueue.poll();
                 }
             }
-            
-            // 如果没有更多数据要写，取消写事件监听
-            if (writeQueue.isEmpty()) {
-                channel.keyFor(server.getSelector()).interestOps(SelectionKey.OP_READ);
-            }
-            
         } catch (IOException e) {
             logger.error("写入客户端数据失败: {}", clientId, e);
             close();
@@ -167,12 +161,6 @@ public class ClientSession {
             case HEARTBEAT:
                 handleHeartbeat(message);
                 break;
-            case TUNNEL_REQUEST:
-                handleTunnelRequest(message);
-                break;
-            case DATA:
-                handleData(message);
-                break;
             default:
                 logger.warn("未知消息类型: {}", message.getType());
         }
@@ -204,34 +192,7 @@ public class ClientSession {
             logger.error("发送心跳确认失败: {}", clientId, e);
         }
     }
-    
-    /**
-     * 处理隧道请求
-     */
-    private void handleTunnelRequest(Message message) {
-        String tunnelId = message.getTunnelId();
-        if (tunnelId != null) {
-            TunnelSession tunnel = server.getTunnel(tunnelId);
-            if (tunnel != null) {
-                // 转发数据到隧道
-                tunnel.forwardToClient(message.getData());
-            }
-        }
-    }
-    
-    /**
-     * 处理数据消息
-     */
-    private void handleData(Message message) {
-        String tunnelId = message.getTunnelId();
-        if (tunnelId != null) {
-            TunnelSession tunnel = server.getTunnel(tunnelId);
-            if (tunnel != null) {
-                // 转发数据到隧道
-                tunnel.forwardToClient(message.getData());
-            }
-        }
-    }
+
     
     /**
      * 发送消息
@@ -242,22 +203,6 @@ public class ClientSession {
         }
         
         writeQueue.offer(buffer.duplicate());
-        
-        // 注册写事件监听
-        channel.keyFor(server.getSelector()).interestOps(SelectionKey.OP_READ | SelectionKey.OP_WRITE);
-    }
-    
-    /**
-     * 转发数据到客户端
-     */
-    public void forwardToClient(byte[] data) {
-        try {
-            Message message = new Message(Message.Type.DATA, clientId, null, data);
-            sendMessage(message.toByteBuffer());
-        } catch (Exception e) {
-            logger.error("转发数据到客户端失败: {}", clientId, e);
-            close();
-        }
     }
     
     /**
@@ -278,8 +223,6 @@ public class ClientSession {
         } catch (IOException e) {
             logger.error("关闭客户端连接失败: {}", clientId, e);
         }
-        
-        server.removeClient(clientId);
     }
     
     // Getters

@@ -1,11 +1,14 @@
 package com.natpenetration.server;
 
 import com.natpenetration.common.Config;
+import com.natpenetration.common.Message;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
+import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
@@ -18,132 +21,157 @@ public class TunnelSession {
     private static final Logger logger = LoggerFactory.getLogger(TunnelSession.class);
     
     private final String tunnelId;
-    private final SocketChannel channel;
+    private final SocketChannel channelForCustomer; // 用户输入的channel
+    private SocketChannel channelForClient;
+
+    private final ServerSocketChannel dataServerSocketChannel;
+
     private final NatServer server;
-    private final ConcurrentLinkedQueue<ByteBuffer> writeQueue;
+    private final ConcurrentLinkedQueue<ByteBuffer> writeToCustomerQueue;
+    private final ConcurrentLinkedQueue<ByteBuffer> writeToClientQueue;
     
-    private ByteBuffer readBuffer;
     private volatile boolean connected = true;
     
-    public TunnelSession(String tunnelId, SocketChannel channel, NatServer server) {
+    public TunnelSession(String tunnelId, SocketChannel channelForCustomer, NatServer server) throws IOException {
         this.tunnelId = tunnelId;
-        this.channel = channel;
+        this.channelForCustomer = channelForCustomer;
         this.server = server;
-        this.writeQueue = new ConcurrentLinkedQueue<>();
-        this.readBuffer = ByteBuffer.allocate(Config.BUFFER_SIZE);
+        this.writeToCustomerQueue = new ConcurrentLinkedQueue<>();
+        this.writeToClientQueue = new ConcurrentLinkedQueue<>();
+        this.dataServerSocketChannel = server.startClientDataListener(this);
+
+        this.server.sendClientMessage(new Message(Message.Type.TUNNEL_OPEN, null, null, String.valueOf(((InetSocketAddress) dataServerSocketChannel.getLocalAddress()).getPort()).getBytes()));
     }
-    
+
+
+    public void setChannelForClient(SocketChannel channelForClient) {
+        this.channelForClient = channelForClient;
+    }
+
     /**
-     * 处理读事件
+     * 处理从用户侧的读事件
      */
-    public void handleRead() {
+    public void handleCustomerRead() {
         if (!connected) {
             return;
         }
-        
-        try {
-            readBuffer.clear();
-            int bytesRead = channel.read(readBuffer);
-            
-            if (bytesRead == -1) {
-                // 连接已关闭
+        while(true) {
+            try {
+                ByteBuffer buffer = ByteBuffer.allocate(Config.BUFFER_SIZE);
+                int bytesRead = channelForCustomer.read(buffer);
+
+                if (bytesRead == -1) {
+                    // 连接已关闭
+                    close();
+                    return;
+                }
+
+                if (bytesRead == 0) {
+                    return;
+                }
+
+                if (bytesRead > 0) {
+                    buffer.flip();
+                    // 转发数据到客户端
+                    writeToClientQueue.offer(buffer);
+                }
+
+            } catch (IOException e) {
+                logger.error("读取隧道数据失败: {}", tunnelId, e);
                 close();
-                return;
             }
-            
-            if (bytesRead > 0) {
-                readBuffer.flip();
-                // 直接转发数据到所有客户端
-                forwardToAllClients();
-            }
-            
-        } catch (IOException e) {
-            logger.error("读取隧道数据失败: {}", tunnelId, e);
-            close();
         }
     }
     
     /**
      * 处理写事件
      */
-    public void handleWrite() {
+    public void handleCustomerWrite() {
         if (!connected) {
             return;
         }
         
         try {
             // 处理写队列中的数据
-            while (!writeQueue.isEmpty()) {
-                ByteBuffer buffer = writeQueue.peek();
+            while (!writeToCustomerQueue.isEmpty()) {
+                ByteBuffer buffer = writeToCustomerQueue.peek();
                 
-                int bytesWritten = channel.write(buffer);
+                int bytesWritten = channelForCustomer.write(buffer);
                 if (bytesWritten == 0) {
                     // 缓冲区已满，等待下次写事件
                     break;
                 }
                 
                 if (!buffer.hasRemaining()) {
-                    writeQueue.poll();
+                    writeToCustomerQueue.poll();
                 }
             }
-            
-            // 如果没有更多数据要写，取消写事件监听
-            if (writeQueue.isEmpty()) {
-                channel.keyFor(server.getSelector()).interestOps(java.nio.channels.SelectionKey.OP_READ);
-            }
-            
         } catch (IOException e) {
             logger.error("写入隧道数据失败: {}", tunnelId, e);
             close();
         }
     }
-    
+
     /**
-     * 转发数据到所有客户端
+     * 处理从用户侧的读事件
      */
-    private void forwardToAllClients() {
-        byte[] data = new byte[readBuffer.remaining()];
-        readBuffer.get(data);
-        
-        server.getClients().values().forEach(client -> {
+    public void handleClientRead() {
+        if (!connected) {
+            return;
+        }
+        while (true) {
             try {
-                client.forwardToClient(data);
-            } catch (Exception e) {
-                logger.error("转发数据到客户端失败: {}", client.getClientId(), e);
+                ByteBuffer buffer = ByteBuffer.allocate(Config.BUFFER_SIZE);
+                int bytesRead = channelForClient.read(buffer);
+
+                if (bytesRead == -1) {
+                    // 连接已关闭
+                    close();
+                    return;
+                }
+
+                if (bytesRead == 0) {
+                    return;
+                }
+
+                if (bytesRead > 0) {
+                    buffer.flip();
+                    // 转发数据到用户端
+                    writeToCustomerQueue.offer(buffer);
+                }
+
+            } catch (IOException e) {
+                logger.error("读取隧道数据失败: {}", tunnelId, e);
+                close();
             }
-        });
-    }
-    
-    /**
-     * 转发数据到隧道
-     */
-    public void forwardToTunnel(byte[] data) {
-        try {
-            ByteBuffer buffer = ByteBuffer.wrap(data);
-            writeQueue.offer(buffer);
-            
-            // 注册写事件监听
-            channel.keyFor(server.getSelector()).interestOps(java.nio.channels.SelectionKey.OP_READ | java.nio.channels.SelectionKey.OP_WRITE);
-            
-        } catch (Exception e) {
-            logger.error("转发数据到隧道失败: {}", tunnelId, e);
-            close();
         }
     }
-    
+
     /**
-     * 转发数据到客户端（从客户端到隧道）
+     * 处理写事件
      */
-    public void forwardToClient(byte[] data) {
+    public void handleClientWrite() {
+        if (!connected) {
+            return;
+        }
+
         try {
-            ByteBuffer buffer = ByteBuffer.wrap(data);
-            writeQueue.offer(buffer);
-            
-            // 注册写事件监听
-            channel.keyFor(server.getSelector()).interestOps(java.nio.channels.SelectionKey.OP_READ | java.nio.channels.SelectionKey.OP_WRITE);
-            
-        } catch (Exception e) {
-            logger.error("转发数据到客户端失败: {}", tunnelId, e);
+            // 处理写队列中的数据
+            while (!writeToClientQueue.isEmpty()) {
+                ByteBuffer buffer = writeToClientQueue.peek();
+
+                int bytesWritten = channelForClient.write(buffer);
+                if (bytesWritten == 0) {
+                    // 缓冲区已满，等待下次写事件
+                    break;
+                }
+
+                if (!buffer.hasRemaining()) {
+                    writeToClientQueue.poll();
+                }
+            }
+        } catch (IOException e) {
+            logger.error("写入隧道数据失败: {}", tunnelId, e);
             close();
         }
     }
@@ -160,8 +188,8 @@ public class TunnelSession {
         logger.info("关闭隧道连接: {}", tunnelId);
         
         try {
-            if (channel != null) {
-                channel.close();
+            if (channelForCustomer != null) {
+                channelForCustomer.close();
             }
         } catch (IOException e) {
             logger.error("关闭隧道连接失败: {}", tunnelId, e);
@@ -170,15 +198,10 @@ public class TunnelSession {
         server.removeTunnel(tunnelId);
     }
     
-    // Getters
     public String getTunnelId() {
         return tunnelId;
     }
-    
-    public SocketChannel getChannel() {
-        return channel;
-    }
-    
+
     public boolean isConnected() {
         return connected;
     }

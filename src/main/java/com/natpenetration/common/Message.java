@@ -10,8 +10,7 @@ public class Message {
     public enum Type {
         REGISTER(1),           // 客户端注册
         HEARTBEAT(2),          // 心跳
-        TUNNEL_REQUEST(3),     // 隧道请求
-        TUNNEL_RESPONSE(4),    // 隧道响应
+        TUNNEL_OPEN(3),     // 隧道开启请求
         DATA(5),               // 数据传输
         ERROR(6);              // 错误
         

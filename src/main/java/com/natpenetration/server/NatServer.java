@@ -8,44 +8,47 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
-import java.nio.channels.*;
+import java.nio.channels.SelectionKey;
+import java.nio.channels.Selector;
+import java.nio.channels.ServerSocketChannel;
+import java.nio.channels.SocketChannel;
 import java.util.Iterator;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * NAT穿透服务端
  * 基于NIO实现，使用零拷贝技术
  */
 public class NatServer {
-    
+
     private static final Logger logger = LoggerFactory.getLogger(NatServer.class);
-    
+
     private final int serverPort;
-    private final ConcurrentHashMap<String, ClientSession> clients;
+    private final int tunnelOuterPort;
+
+    private ClientSession clientSession;
     private final ConcurrentHashMap<String, TunnelSession> tunnels;
-    
+
     private Selector selector;
     private ServerSocketChannel serverChannel;
-    private ServerSocketChannel tunnelChannel;
+    private ServerSocketChannel tunnelOuterChannel;
     private ScheduledExecutorService scheduler;
     private volatile boolean running = false;
 
-    private final int MIN_TUNNEL_PORT = 8090;
-    private final int MAX_TUNNEL_PORT = 8999;
-    
     public NatServer() {
-        this(Config.SERVER_PORT);
+        this(Config.SERVER_PORT, Config.TUNNEL_OUTER_DATA_PORT);
     }
-    
-    public NatServer(int serverPort) {
+
+    public NatServer(int serverPort, int tunnelOuterPort) {
         this.serverPort = serverPort;
-        this.clients = new ConcurrentHashMap<>();
+        this.tunnelOuterPort = tunnelOuterPort;
         this.tunnels = new ConcurrentHashMap<>();
     }
-    
+
     /**
      * 启动服务端
      */
@@ -54,31 +57,34 @@ public class NatServer {
             logger.warn("服务端已经在运行中");
             return;
         }
-        
+
         try {
             // 初始化选择器
             selector = Selector.open();
-            
+
             // 启动客户端连接监听
             startClientListener();
-            
+
+            // 启动隧道连接监听
+            startTunnelListener();
+
             // 启动心跳调度器
             scheduler = Executors.newScheduledThreadPool(1);
             scheduler.scheduleAtFixedRate(this::sendHeartbeat, 0, Config.HEARTBEAT_INTERVAL, TimeUnit.MILLISECONDS);
-            
+
             running = true;
             logger.info("NAT穿透服务端启动成功");
             logger.info("客户端连接端口: {}", serverPort);
-            
+
             // 主事件循环
             eventLoop();
-            
+
         } catch (IOException e) {
             logger.error("启动服务端失败", e);
             stop();
         }
     }
-    
+
     /**
      * 启动客户端连接监听
      */
@@ -89,18 +95,30 @@ public class NatServer {
         serverChannel.register(selector, SelectionKey.OP_ACCEPT);
         logger.info("开始监听客户端连接，端口: {}", serverPort);
     }
-    
+
     /**
      * 启动隧道监听
      */
-    private void startTunnelListener(int tunnelPort) throws IOException {
-        tunnelChannel = ServerSocketChannel.open();
-        tunnelChannel.configureBlocking(false);
-        tunnelChannel.socket().bind(new InetSocketAddress(tunnelPort));
-        tunnelChannel.register(selector, SelectionKey.OP_ACCEPT);
-        logger.info("开始监听隧道连接，端口: {}", tunnelPort);
+    private void startTunnelListener() throws IOException {
+        tunnelOuterChannel = ServerSocketChannel.open();
+        tunnelOuterChannel.configureBlocking(false);
+        tunnelOuterChannel.socket().bind(new InetSocketAddress(tunnelOuterPort));
+        tunnelOuterChannel.register(selector, SelectionKey.OP_ACCEPT);
+        logger.info("开始监听隧道连接，端口: {}", tunnelOuterPort);
     }
-    
+
+    /**
+     * 启动客户端数据通道监听
+     */
+    public ServerSocketChannel startClientDataListener(Object att) throws IOException {
+        ServerSocketChannel serverSocketChannel = ServerSocketChannel.open();
+        serverSocketChannel.configureBlocking(false);
+        serverSocketChannel.socket().bind(new InetSocketAddress(0));
+        serverSocketChannel.register(selector, SelectionKey.OP_ACCEPT, att);
+        logger.info("开始监听客户端数据通道连接，端口: {}", ((InetSocketAddress) serverSocketChannel.getLocalAddress()).getPort());
+        return serverSocketChannel;
+    }
+
     /**
      * 主事件循环
      */
@@ -111,16 +129,16 @@ public class NatServer {
                 if (readyChannels == 0) {
                     continue;
                 }
-                
+
                 Iterator<SelectionKey> keyIterator = selector.selectedKeys().iterator();
                 while (keyIterator.hasNext()) {
                     SelectionKey key = keyIterator.next();
                     keyIterator.remove();
-                    
+
                     if (!key.isValid()) {
                         continue;
                     }
-                    
+
                     if (key.isAcceptable()) {
                         handleAccept(key);
                     } else if (key.isReadable()) {
@@ -136,7 +154,9 @@ public class NatServer {
             }
         }
     }
-    
+
+    record SelectionKeyForTunnelSession(TunnelSession tunnelSession, int customOrClient) {}
+
     /**
      * 处理连接接受事件
      */
@@ -144,70 +164,83 @@ public class NatServer {
         ServerSocketChannel serverSocketChannel = (ServerSocketChannel) key.channel();
         SocketChannel clientChannel = serverSocketChannel.accept();
         clientChannel.configureBlocking(false);
-        
+
         if (serverSocketChannel == serverChannel) {
             // 客户端连接
             String clientId = "client_" + System.currentTimeMillis();
             ClientSession clientSession = new ClientSession(clientId, clientChannel, this);
-            clients.put(clientId, clientSession);
-            
-            clientChannel.register(selector, SelectionKey.OP_READ, clientSession);
+            this.clientSession = clientSession;
+
+            clientChannel.register(selector, SelectionKey.OP_READ | SelectionKey.OP_WRITE, clientSession);
             logger.info("新的客户端连接: {} -> {}", clientChannel.getRemoteAddress(), clientId);
-            
-        } else if (serverSocketChannel == tunnelChannel) {
+
+        } else if (serverSocketChannel == tunnelOuterChannel) {
             // 隧道连接
             String tunnelId = "tunnel_" + System.currentTimeMillis();
+
             TunnelSession tunnelSession = new TunnelSession(tunnelId, clientChannel, this);
             tunnels.put(tunnelId, tunnelSession);
-            
-            clientChannel.register(selector, SelectionKey.OP_READ, tunnelSession);
+
+            clientChannel.register(selector, SelectionKey.OP_READ | SelectionKey.OP_WRITE, new SelectionKeyForTunnelSession(tunnelSession, 1));
             logger.info("新的隧道连接: {} -> {}", clientChannel.getRemoteAddress(), tunnelId);
+        } else if (key.attachment() instanceof TunnelSession tunnelSession) {
+            tunnelSession.setChannelForClient(clientChannel);
+            clientChannel.register(selector, SelectionKey.OP_READ | SelectionKey.OP_WRITE, new SelectionKeyForTunnelSession(tunnelSession, 2));
+            logger.info("新的客户端数据连接: {} -> {}", clientChannel.getRemoteAddress(), serverSocketChannel.getLocalAddress());
         }
     }
-    
+
     /**
      * 处理读事件
      */
     private void handleRead(SelectionKey key) throws IOException {
         Object attachment = key.attachment();
-        
-        if (attachment instanceof ClientSession) {
-            ((ClientSession) attachment).handleRead();
-        } else if (attachment instanceof TunnelSession) {
-            ((TunnelSession) attachment).handleRead();
+
+        if (attachment instanceof ClientSession session) {
+            session.handleRead();
+        } else if (attachment instanceof SelectionKeyForTunnelSession tunnelSessionRecord) {
+            if (tunnelSessionRecord.customOrClient == 1) {
+                tunnelSessionRecord.tunnelSession.handleCustomerRead();
+            } else if (tunnelSessionRecord.customOrClient == 2) {
+                tunnelSessionRecord.tunnelSession.handleClientRead();
+            }
         }
     }
-    
+
     /**
      * 处理写事件
      */
     private void handleWrite(SelectionKey key) throws IOException {
         Object attachment = key.attachment();
-        
-        if (attachment instanceof ClientSession) {
-            ((ClientSession) attachment).handleWrite();
-        } else if (attachment instanceof TunnelSession) {
-            ((TunnelSession) attachment).handleWrite();
+
+        if (attachment instanceof ClientSession clientSession) {
+            clientSession.handleWrite();
+        } else if (attachment instanceof SelectionKeyForTunnelSession tunnelSessionRecord) {
+            if (tunnelSessionRecord.customOrClient == 1) {
+                tunnelSessionRecord.tunnelSession.handleCustomerWrite();
+            } else if (tunnelSessionRecord.customOrClient == 2) {
+                tunnelSessionRecord.tunnelSession.handleClientWrite();
+            }
         }
     }
-    
+
+    public void sendClientMessage(Message msg) throws IOException {
+        clientSession.sendMessage(msg.toByteBuffer());
+    }
+
     /**
      * 发送心跳
      */
     private void sendHeartbeat() {
-
-        
-        clients.values().forEach(client -> {
-            try {
-                Message heartbeat = new Message(Message.Type.HEARTBEAT, client.getClientId(), null, null);
-                ByteBuffer buffer = heartbeat.toByteBuffer();
-                client.sendMessage(buffer);
-            } catch (IOException e) {
-                logger.error("发送心跳失败: {}", client.getClientId(), e);
-            }
-        });
+        try {
+            Message heartbeat = new Message(Message.Type.HEARTBEAT, clientSession.getClientId(), null, null);
+            ByteBuffer buffer = heartbeat.toByteBuffer();
+            clientSession.sendMessage(buffer);
+        } catch (IOException e) {
+            logger.error("发送心跳失败: {}", clientSession.getClientId(), e);
+        }
     }
-    
+
     /**
      * 停止服务端
      */
@@ -215,23 +248,22 @@ public class NatServer {
         if (!running) {
             return;
         }
-        
+
         running = false;
         logger.info("正在停止服务端...");
-        
+
         // 关闭所有客户端连接
-        clients.values().forEach(ClientSession::close);
-        clients.clear();
-        
+        clientSession.close();
+
         // 关闭所有隧道连接
         tunnels.values().forEach(TunnelSession::close);
         tunnels.clear();
-        
+
         // 关闭调度器
         if (scheduler != null) {
             scheduler.shutdown();
         }
-        
+
         // 关闭选择器
         try {
             if (selector != null) {
@@ -240,52 +272,23 @@ public class NatServer {
             if (serverChannel != null) {
                 serverChannel.close();
             }
-            if (tunnelChannel != null) {
-                tunnelChannel.close();
+            if (tunnelOuterChannel != null) {
+                tunnelOuterChannel.close();
             }
         } catch (IOException e) {
             logger.error("关闭服务端资源时发生错误", e);
         }
-        
+
         logger.info("服务端已停止");
     }
-    
-    /**
-     * 获取客户端会话
-     */
-    public ClientSession getClient(String clientId) {
-        return clients.get(clientId);
-    }
-    
-    /**
-     * 获取隧道会话
-     */
-    public TunnelSession getTunnel(String tunnelId) {
-        return tunnels.get(tunnelId);
-    }
-    
-    /**
-     * 移除客户端会话
-     */
-    public void removeClient(String clientId) {
-        clients.remove(clientId);
-        logger.info("客户端 {} 已断开连接", clientId);
-    }
-    
+
     /**
      * 获取选择器
      */
     public Selector getSelector() {
         return selector;
     }
-    
-    /**
-     * 获取所有客户端
-     */
-    public ConcurrentHashMap<String, ClientSession> getClients() {
-        return clients;
-    }
-    
+
     /**
      * 移除隧道会话
      */
@@ -293,16 +296,16 @@ public class NatServer {
         tunnels.remove(tunnelId);
         logger.info("隧道 {} 已断开连接", tunnelId);
     }
-    
+
     /**
      * 主方法
      */
     public static void main(String[] args) {
         NatServer server = new NatServer();
-        
+
         // 添加关闭钩子
         Runtime.getRuntime().addShutdownHook(new Thread(server::stop));
-        
+
         // 启动服务端
         server.start();
     }

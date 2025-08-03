@@ -6,6 +6,9 @@ package com.natpenetration.common;
 public class Config {
     // 服务端配置
     public static final int SERVER_PORT = 8080;           // 服务端监听端口
+
+    // 对外隧道配置
+    public static final int TUNNEL_OUTER_DATA_PORT = 8081;
     
     // 客户端配置
     public static final int LOCAL_SERVICE_PORT = 8082;     // 本地服务端口
