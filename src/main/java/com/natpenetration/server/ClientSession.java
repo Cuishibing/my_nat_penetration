@@ -227,6 +227,9 @@ public class ClientSession {
         } catch (IOException e) {
             logger.error("关闭客户端连接失败: {}", clientId, e);
         }
+        
+        // 通知服务端客户端已断开
+        server.onClientDisconnected();
     }
     
     // Getters

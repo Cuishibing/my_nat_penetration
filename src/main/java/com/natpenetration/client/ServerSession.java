@@ -23,7 +23,7 @@ public class ServerSession {
     private final NatClient client;
     private final ConcurrentLinkedQueue<ByteBuffer> writeQueue;
 
-    private ByteBuffer readBuffer;
+    private final ByteBuffer readBuffer;
     private volatile boolean connected = true;
 
     public ServerSession(String clientId, SocketChannel channel, NatClient client) {
@@ -253,7 +253,8 @@ public class ServerSession {
             logger.error("关闭服务器连接失败: {}", clientId, e);
         }
 
-        client.stop();
+        // 不要直接停止客户端，而是通知连接断开
+        client.onConnectionLost();
     }
 
     // Getters

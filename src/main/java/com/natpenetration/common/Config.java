@@ -20,6 +20,11 @@ public class Config {
     public static final int CONNECTION_TIMEOUT = 30000;   // 连接超时时间(毫秒)
     public static final int HEARTBEAT_INTERVAL = 30000;   // 心跳间隔(毫秒)
     
+    // 重连配置
+    public static final int MAX_RECONNECT_ATTEMPTS = 10;  // 最大重连次数
+    public static final long RECONNECT_DELAY_MS = 5000;   // 重连延迟(毫秒)
+    public static final int CONNECTION_CHECK_INTERVAL = 10000; // 连接检查间隔(毫秒)
+    
     // 服务器地址
     public static final String SERVER_HOST = "localhost"; // 服务器地址
 } 

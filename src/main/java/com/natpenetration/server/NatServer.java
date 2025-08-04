@@ -32,6 +32,7 @@ public class NatServer {
 
     private ClientSession clientSession;
     private final ConcurrentHashMap<String, TunnelSession> tunnels;
+    private volatile boolean clientConnected = false;
 
     private Selector selector;
     private ServerSocketChannel serverChannel;
@@ -170,6 +171,7 @@ public class NatServer {
             String clientId = "client_" + System.currentTimeMillis();
             ClientSession clientSession = new ClientSession(clientId, clientChannel, this);
             this.clientSession = clientSession;
+            this.clientConnected = true;
 
             clientChannel.register(selector, SelectionKey.OP_READ | SelectionKey.OP_WRITE, clientSession);
             logger.info("新的客户端连接: {} -> {}", clientChannel.getRemoteAddress(), clientId);
@@ -236,7 +238,7 @@ public class NatServer {
      * 发送心跳
      */
     private void sendHeartbeat() {
-        if (clientSession == null) {
+        if (clientSession == null || !clientConnected) {
             logger.debug("跳过心跳发送，客户端会话未连接");
             return;
         }
@@ -247,6 +249,19 @@ public class NatServer {
         } catch (IOException e) {
             logger.error("发送心跳失败: {}", clientSession.getClientId(), e);
         }
+    }
+
+    /**
+     * 处理客户端断开连接
+     */
+    public void onClientDisconnected() {
+        clientConnected = false;
+        clientSession = null;
+        logger.info("客户端已断开连接，服务端继续运行等待新的客户端连接");
+        
+        // 清理所有隧道连接
+        tunnels.values().forEach(TunnelSession::close);
+        tunnels.clear();
     }
 
     /**

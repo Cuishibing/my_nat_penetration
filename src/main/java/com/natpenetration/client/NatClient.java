@@ -8,13 +8,13 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
-import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.util.Iterator;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * NAT穿透客户端
@@ -32,12 +32,18 @@ public class NatClient {
     private Selector selector;
     private ScheduledExecutorService scheduler;
     private volatile boolean running = false;
+    private volatile boolean connected = false;
 
     // 服务器会话
     private ServerSession serverSession;
 
     // 本地会话映射：tunnelId -> LocalSession
     private final ConcurrentHashMap<String, LocalSession> localSessionMapping;
+
+    // 重连相关
+    private final AtomicInteger reconnectAttempts = new AtomicInteger(0);
+    private static final int MAX_RECONNECT_ATTEMPTS = Config.MAX_RECONNECT_ATTEMPTS;
+    private static final long RECONNECT_DELAY_MS = Config.RECONNECT_DELAY_MS;
 
     public NatClient() {
         this(Config.SERVER_HOST, Config.SERVER_PORT, Config.LOCAL_SERVICE_PORT);
@@ -64,24 +70,26 @@ public class NatClient {
             // 初始化选择器
             selector = Selector.open();
 
-            // 连接到服务器
-            connectToServer();
-
             // 启动心跳调度器
-            scheduler = Executors.newScheduledThreadPool(1);
+            scheduler = Executors.newScheduledThreadPool(2);
             scheduler.scheduleAtFixedRate(this::sendHeartbeat, 0, Config.HEARTBEAT_INTERVAL, TimeUnit.MILLISECONDS);
+            scheduler.scheduleAtFixedRate(this::checkConnection, 0, Config.CONNECTION_CHECK_INTERVAL, TimeUnit.MILLISECONDS); // 每10秒检查连接状态
 
             running = true;
             logger.info("NAT穿透客户端启动成功");
             logger.info("客户端ID: {}", clientId);
             logger.info("本地服务端口: {}", localPort);
 
+            // 尝试初始连接
+            connectToServer();
+
             // 主事件循环
             eventLoop();
 
         } catch (IOException e) {
             logger.error("启动客户端失败", e);
-            stop();
+            // 不要直接退出，而是尝试重连
+            scheduleReconnect();
         }
     }
 
@@ -89,28 +97,106 @@ public class NatClient {
      * 连接到服务器
      */
     private void connectToServer() throws IOException {
-        SocketChannel serverChannel = SocketChannel.open();
-        serverChannel.configureBlocking(false);
-        serverChannel.connect(new InetSocketAddress(serverHost, serverPort));
-
-        // 等待连接完成
-        while (!serverChannel.finishConnect()) {
-            try {
-                Thread.sleep(100);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new IOException("连接被中断", e);
-            }
+        if (connected) {
+            return;
         }
 
-        // 创建服务器会话
-        serverSession = new ServerSession(clientId, serverChannel, this);
-        // 修复：在一个register调用中指定多个操作
-        serverChannel.register(selector, SelectionKey.OP_READ | SelectionKey.OP_WRITE, serverSession);
-        logger.info("已连接到服务器: {}:{}", serverHost, serverPort);
+        try {
+            SocketChannel serverChannel = SocketChannel.open();
+            serverChannel.configureBlocking(false);
+            serverChannel.connect(new InetSocketAddress(serverHost, serverPort));
 
-        // 发送注册消息
-        serverSession.sendRegister();
+            // 等待连接完成，设置超时
+            long startTime = System.currentTimeMillis();
+            while (!serverChannel.finishConnect()) {
+                if (System.currentTimeMillis() - startTime > 10000) { // 10秒超时
+                    throw new IOException("连接超时");
+                }
+                try {
+                    Thread.sleep(100);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("连接被中断", e);
+                }
+            }
+
+            // 创建服务器会话
+            serverSession = new ServerSession(clientId, serverChannel, this);
+            serverChannel.register(selector, SelectionKey.OP_READ | SelectionKey.OP_WRITE, serverSession);
+            
+            connected = true;
+            reconnectAttempts.set(0); // 重置重连计数
+            logger.info("已连接到服务器: {}:{}", serverHost, serverPort);
+
+            // 发送注册消息
+            serverSession.sendRegister();
+
+        } catch (IOException e) {
+            connected = false;
+            logger.error("连接服务器失败: {}:{}", serverHost, serverPort, e);
+            throw e;
+        }
+    }
+
+    /**
+     * 检查连接状态
+     */
+    private void checkConnection() {
+        if (!running) {
+            return;
+        }
+
+        if (!connected || serverSession == null || !serverSession.isConnected()) {
+            logger.warn("检测到连接断开，尝试重连...");
+            scheduleReconnect();
+        }
+    }
+
+    /**
+     * 安排重连
+     */
+    private void scheduleReconnect() {
+        if (!running) {
+            return;
+        }
+
+        int attempts = reconnectAttempts.incrementAndGet();
+        if (attempts > MAX_RECONNECT_ATTEMPTS) {
+            logger.error("重连次数超过最大限制({})，停止重连", MAX_RECONNECT_ATTEMPTS);
+            return;
+        }
+
+        logger.info("安排重连，第{}次尝试，延迟{}毫秒", attempts, RECONNECT_DELAY_MS);
+        
+        scheduler.schedule(() -> {
+            if (running && !connected) {
+                try {
+                    connectToServer();
+                } catch (IOException e) {
+                    logger.error("重连失败", e);
+                    scheduleReconnect(); // 继续重连
+                }
+            }
+        }, RECONNECT_DELAY_MS, TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * 处理连接断开
+     */
+    public void onConnectionLost() {
+        if (!running) {
+            return;
+        }
+
+        connected = false;
+        logger.warn("与服务器的连接已断开");
+        
+        // 清理本地会话
+        localSessionMapping.values().forEach(LocalSession::close);
+        localSessionMapping.clear();
+        
+        // 安排重连
+        scheduleReconnect();
     }
 
     record SelectionKeyForLocalSession(LocalSession localSession, int localOrRemote) {}
@@ -188,6 +274,8 @@ public class NatClient {
             } catch (IOException e) {
                 if (running) {
                     logger.error("事件循环处理错误", e);
+                    // 不要退出，而是尝试重连
+                    onConnectionLost();
                 }
             }
         }
@@ -233,7 +321,7 @@ public class NatClient {
      * 发送心跳
      */
     private void sendHeartbeat() {
-        if (serverSession != null && serverSession.isConnected()) {
+        if (serverSession != null && serverSession.isConnected() && connected) {
             serverSession.sendHeartbeat();
         }
     }
@@ -247,6 +335,7 @@ public class NatClient {
         }
 
         running = false;
+        connected = false;
         logger.info("正在停止客户端...");
 
         // 关闭调度器
@@ -258,6 +347,10 @@ public class NatClient {
         if (serverSession != null) {
             serverSession.close();
         }
+
+        // 关闭所有本地会话
+        localSessionMapping.values().forEach(LocalSession::close);
+        localSessionMapping.clear();
 
         // 关闭选择器
         try {
@@ -278,6 +371,10 @@ public class NatClient {
 
     public Selector getSelector() {
         return selector;
+    }
+
+    public boolean isConnected() {
+        return connected;
     }
 
     /**
