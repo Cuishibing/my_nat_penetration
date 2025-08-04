@@ -161,10 +161,6 @@ public class NatClient {
         }
 
         int attempts = reconnectAttempts.incrementAndGet();
-        if (attempts > MAX_RECONNECT_ATTEMPTS) {
-            logger.error("重连次数超过最大限制({})，停止重连", MAX_RECONNECT_ATTEMPTS);
-            return;
-        }
 
         logger.info("安排重连，第{}次尝试，延迟{}毫秒", attempts, RECONNECT_DELAY_MS);
         

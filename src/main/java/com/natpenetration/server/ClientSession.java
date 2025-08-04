@@ -9,7 +9,6 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.SocketChannel;
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.nio.channels.SelectionKey;
 
 /**
  * 客户端会话
