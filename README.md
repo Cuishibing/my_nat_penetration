@@ -70,8 +70,8 @@ mvn exec:java -Dexec.mainClass="com.natpenetration.server.NatServer"
 ### 2. 启动客户端
 
 ```bash
-# 在内网机器上运行，假设本地有一个Web服务运行在8080端口
-java -cp nat-penetration-1.0.0.jar com.natpenetration.client.NatClient <服务端地址> 8080 <本地服务端口>
+# 在内网机器上运行，假设本地有一个Web服务运行在9000端口
+java -cp nat-penetration-1.0.0.jar com.natpenetration.client.NatClient <服务端地址> 8080 9000
 ```
 
 ### 3. 访问内网服务
