@@ -42,7 +42,6 @@ public class NatClient {
 
     // 重连相关
     private final AtomicInteger reconnectAttempts = new AtomicInteger(0);
-    private static final int MAX_RECONNECT_ATTEMPTS = Config.MAX_RECONNECT_ATTEMPTS;
     private static final long RECONNECT_DELAY_MS = Config.RECONNECT_DELAY_MS;
 
     public NatClient() {
