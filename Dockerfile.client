@@ -1,0 +1,54 @@
+# 多阶段构建Dockerfile - 客户端
+FROM maven:3.9.6-eclipse-temurin-21-alpine AS builder
+
+# 设置工作目录
+WORKDIR /app
+
+# 配置Maven镜像
+RUN mkdir -p /root/.m2 && \
+    echo '<?xml version="1.0" encoding="UTF-8"?>' > /root/.m2/settings.xml && \
+    echo '<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"' >> /root/.m2/settings.xml && \
+    echo '          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"' >> /root/.m2/settings.xml && \
+    echo '          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0' >> /root/.m2/settings.xml && \
+    echo '                          http://maven.apache.org/xsd/settings-1.0.0.xsd">' >> /root/.m2/settings.xml && \
+    echo '  <mirrors>' >> /root/.m2/settings.xml && \
+    echo '    <mirror>' >> /root/.m2/settings.xml && \
+    echo '      <id>central_mirror</id>' >> /root/.m2/settings.xml && \
+    echo '      <mirrorOf>central</mirrorOf>' >> /root/.m2/settings.xml && \
+    echo '      <name>Human Readable Name for this Mirror.</name>' >> /root/.m2/settings.xml && \
+    echo '      <url>https://maven.aliyun.com/repository/central</url>' >> /root/.m2/settings.xml && \
+    echo '    </mirror>' >> /root/.m2/settings.xml && \
+    echo '  </mirrors>' >> /root/.m2/settings.xml && \
+    echo '</settings>' >> /root/.m2/settings.xml
+
+# 复制pom.xml
+COPY pom.xml .
+
+# 下载依赖
+# RUN mvn dependency:go-offline -B
+
+# 复制源代码
+COPY src ./src
+
+# 编译和打包
+RUN mvn clean package -DskipTests
+
+# 运行阶段
+FROM openjdk:21
+
+# 设置工作目录
+WORKDIR /app
+
+# 创建日志目录
+RUN mkdir -p /app/logs
+
+# 从构建阶段复制jar文件
+COPY --from=builder /app/target/nat-penetration-1.0.0.jar ./app.jar
+
+# 客户端不需要暴露端口，只连接外部服务
+
+# 设置JVM参数
+ENV JAVA_OPTS="-Xmx512m -Xms256m"
+
+# 默认启动客户端
+CMD ["java", "-cp", "app.jar", "com.natpenetration.client.NatClient", "localhost", "8080", "8082"] 

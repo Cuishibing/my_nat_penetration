@@ -41,7 +41,7 @@ public class ServerSession {
         if (!connected) {
             return;
         }
-
+        logger.info("client trigger read");
         try {
             int bytesRead = channel.read(readBuffer);
 
@@ -69,7 +69,7 @@ public class ServerSession {
         if (!connected) {
             return;
         }
-
+        logger.info("client trigger write");
         try {
             // 处理写队列中的数据
             while (!writeQueue.isEmpty()) {
@@ -169,7 +169,7 @@ public class ServerSession {
                 try {
                     client.connectToLocalServer(remoteDataPort);
                 } catch (IOException e) {
-                    logger.error("连接到本地服务失败，端口: {}, 错误: {}", remoteDataPort, e.getMessage());
+                    logger.error("连接到本地服务失败，端口: {}, 错误: {}", remoteDataPort, e.getMessage(),e);
                     // 不要抛出RuntimeException，而是记录错误并继续
                     // 这样可以避免客户端因为连接失败而完全停止
                 }

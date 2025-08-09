@@ -62,7 +62,7 @@ public class TunnelSession {
         if (!connected) {
             return;
         }
-        
+        logger.info("tunnel trigger read");
         try {
             // 修复：重用ByteBuffer
             customerReadBuffer.clear();
@@ -93,7 +93,7 @@ public class TunnelSession {
         if (!connected) {
             return;
         }
-        
+        logger.info("tunnel trigger write");
         try {
             // 处理写队列中的数据
             while (!writeToCustomerQueue.isEmpty()) {
@@ -122,7 +122,7 @@ public class TunnelSession {
         if (!connected) {
             return;
         }
-        
+        logger.info("tunnel trigger read");
         try {
             // 修复：重用ByteBuffer
             clientReadBuffer.clear();
@@ -153,7 +153,7 @@ public class TunnelSession {
         if (!connected) {
             return;
         }
-
+        logger.info("tunnel trigger write");
         try {
             // 处理写队列中的数据
             while (!writeToClientQueue.isEmpty()) {

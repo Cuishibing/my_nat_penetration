@@ -49,7 +49,7 @@ public class LocalSession {
         if (!connected) {
             return;
         }
-        
+        logger.info("local trigger read");
         try {
             // 修复：重用ByteBuffer
             localReadBuffer.clear();
@@ -80,7 +80,7 @@ public class LocalSession {
         if (!connected) {
             return;
         }
-
+        logger.info("local trigger write");
         try {
             // 处理写队列中的数据
             while (!writeLocalQueue.isEmpty()) {
@@ -109,7 +109,7 @@ public class LocalSession {
         if (!connected) {
             return;
         }
-
+        logger.info("remote trigger read");
         try {
             // 修复：重用ByteBuffer并读取正确的channel
             remoteReadBuffer.clear();
@@ -140,7 +140,7 @@ public class LocalSession {
         if (!connected) {
             return;
         }
-
+        logger.info("remote trigger write");
         try {
             // 处理写队列中的数据
             while (!writeRemoteQueue.isEmpty()) {

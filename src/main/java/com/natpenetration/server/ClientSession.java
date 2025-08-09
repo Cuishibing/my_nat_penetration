@@ -41,7 +41,7 @@ public class ClientSession {
         if (!connected) {
             return;
         }
-        
+        logger.info("server trigger read");
         try {
             int bytesRead = channel.read(readBuffer);
             
@@ -69,7 +69,7 @@ public class ClientSession {
         if (!connected) {
             return;
         }
-        
+        logger.info("server trigger write");
         try {
             // 处理写队列中的数据
             while (!writeQueue.isEmpty()) {
