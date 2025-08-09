@@ -82,7 +82,7 @@ public class TunnelSession {
                 writeToClientQueue.offer(customerReadBuffer.duplicate());
                 
                 // 修复：如果写队列之前为空，现在有数据了，需要重新注册写事件
-                if (wasEmpty) {
+                if (wasEmpty && channelForClient != null) {
                     SelectionKey key = channelForClient.keyFor(server.getSelector());
                     if (key != null && key.isValid()) {
                         key.interestOps(key.interestOps() | SelectionKey.OP_WRITE);
@@ -121,7 +121,7 @@ public class TunnelSession {
             }
             
             // 修复：当写队列为空时，取消写事件监听
-            if (writeToCustomerQueue.isEmpty()) {
+            if (writeToCustomerQueue.isEmpty() && channelForCustomer != null) {
                 SelectionKey key = channelForCustomer.keyFor(server.getSelector());
                 if (key != null && key.isValid()) {
                     key.interestOps(key.interestOps() & ~SelectionKey.OP_WRITE);
@@ -159,7 +159,7 @@ public class TunnelSession {
                 writeToCustomerQueue.offer(clientReadBuffer.duplicate());
                 
                 // 修复：如果写队列之前为空，现在有数据了，需要重新注册写事件
-                if (wasEmpty) {
+                if (wasEmpty && channelForCustomer != null) {
                     SelectionKey key = channelForCustomer.keyFor(server.getSelector());
                     if (key != null && key.isValid()) {
                         key.interestOps(key.interestOps() | SelectionKey.OP_WRITE);
@@ -198,7 +198,7 @@ public class TunnelSession {
             }
             
             // 修复：当写队列为空时，取消写事件监听
-            if (writeToClientQueue.isEmpty()) {
+            if (writeToClientQueue.isEmpty() && channelForClient != null) {
                 SelectionKey key = channelForClient.keyFor(server.getSelector());
                 if (key != null && key.isValid()) {
                     key.interestOps(key.interestOps() & ~SelectionKey.OP_WRITE);
