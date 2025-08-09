@@ -10,6 +10,7 @@ import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
+import java.nio.channels.SelectionKey;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
 /**
@@ -77,7 +78,16 @@ public class TunnelSession {
             if (bytesRead > 0) {
                 customerReadBuffer.flip();
                 // 转发数据到客户端
+                boolean wasEmpty = writeToClientQueue.isEmpty();
                 writeToClientQueue.offer(customerReadBuffer.duplicate());
+                
+                // 修复：如果写队列之前为空，现在有数据了，需要重新注册写事件
+                if (wasEmpty) {
+                    SelectionKey key = channelForClient.keyFor(server.getSelector());
+                    if (key != null && key.isValid()) {
+                        key.interestOps(key.interestOps() | SelectionKey.OP_WRITE);
+                    }
+                }
             }
 
         } catch (IOException e) {
@@ -109,6 +119,14 @@ public class TunnelSession {
                     writeToCustomerQueue.poll();
                 }
             }
+            
+            // 修复：当写队列为空时，取消写事件监听
+            if (writeToCustomerQueue.isEmpty()) {
+                SelectionKey key = channelForCustomer.keyFor(server.getSelector());
+                if (key != null && key.isValid()) {
+                    key.interestOps(key.interestOps() & ~SelectionKey.OP_WRITE);
+                }
+            }
         } catch (IOException e) {
             logger.error("写入隧道数据失败: {}", tunnelId, e);
             close();
@@ -137,7 +155,16 @@ public class TunnelSession {
             if (bytesRead > 0) {
                 clientReadBuffer.flip();
                 // 转发数据到用户端
+                boolean wasEmpty = writeToCustomerQueue.isEmpty();
                 writeToCustomerQueue.offer(clientReadBuffer.duplicate());
+                
+                // 修复：如果写队列之前为空，现在有数据了，需要重新注册写事件
+                if (wasEmpty) {
+                    SelectionKey key = channelForCustomer.keyFor(server.getSelector());
+                    if (key != null && key.isValid()) {
+                        key.interestOps(key.interestOps() | SelectionKey.OP_WRITE);
+                    }
+                }
             }
 
         } catch (IOException e) {
@@ -167,6 +194,14 @@ public class TunnelSession {
 
                 if (!buffer.hasRemaining()) {
                     writeToClientQueue.poll();
+                }
+            }
+            
+            // 修复：当写队列为空时，取消写事件监听
+            if (writeToClientQueue.isEmpty()) {
+                SelectionKey key = channelForClient.keyFor(server.getSelector());
+                if (key != null && key.isValid()) {
+                    key.interestOps(key.interestOps() & ~SelectionKey.OP_WRITE);
                 }
             }
         } catch (IOException e) {

@@ -7,6 +7,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.channels.SelectionKey;
 import java.nio.channels.SocketChannel;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
@@ -83,6 +84,14 @@ public class ClientSession {
                 
                 if (!buffer.hasRemaining()) {
                     writeQueue.poll();
+                }
+            }
+            
+            // 修复：当写队列为空时，取消写事件监听
+            if (writeQueue.isEmpty()) {
+                SelectionKey key = channel.keyFor(server.getSelector());
+                if (key != null && key.isValid()) {
+                    key.interestOps(key.interestOps() & ~SelectionKey.OP_WRITE);
                 }
             }
         } catch (IOException e) {
@@ -201,7 +210,16 @@ public class ClientSession {
             throw new IOException("连接已断开");
         }
         
+        boolean wasEmpty = writeQueue.isEmpty();
         writeQueue.offer(buffer.duplicate());
+        
+        // 修复：如果写队列之前为空，现在有数据了，需要重新注册写事件
+        if (wasEmpty) {
+            SelectionKey key = channel.keyFor(server.getSelector());
+            if (key != null && key.isValid()) {
+                key.interestOps(key.interestOps() | SelectionKey.OP_WRITE);
+            }
+        }
     }
     
     /**

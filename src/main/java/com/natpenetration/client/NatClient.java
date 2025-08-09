@@ -121,7 +121,7 @@ public class NatClient {
 
             // 创建服务器会话
             serverSession = new ServerSession(clientId, serverChannel, this);
-            serverChannel.register(selector, SelectionKey.OP_READ | SelectionKey.OP_WRITE, serverSession);
+            serverChannel.register(selector, SelectionKey.OP_READ, serverSession);
             
             connected = true;
             reconnectAttempts.set(0); // 重置重连计数
@@ -234,8 +234,8 @@ public class NatClient {
         LocalSession localSession = new LocalSession("tunnel_" + System.currentTimeMillis(), localSocketChannel, remoteSocketChannel, this);
         localSessionMapping.put(localSession.getTunnelId(), localSession);
 
-        localSocketChannel.register(selector, SelectionKey.OP_READ | SelectionKey.OP_WRITE, new SelectionKeyForLocalSession(localSession, 1));
-        remoteSocketChannel.register(selector, SelectionKey.OP_READ | SelectionKey.OP_WRITE, new SelectionKeyForLocalSession(localSession, 2));
+        localSocketChannel.register(selector, SelectionKey.OP_READ, new SelectionKeyForLocalSession(localSession, 1));
+        remoteSocketChannel.register(selector, SelectionKey.OP_READ, new SelectionKeyForLocalSession(localSession, 2));
         
         logger.info("已连接到本地服务 localhost:{} 和远程服务器 {}:{}", localPort, serverHost, remoteDataPort);
     }

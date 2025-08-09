@@ -8,6 +8,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.SocketChannel;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.nio.channels.SelectionKey;
 
 /**
  * 本地会话
@@ -64,7 +65,16 @@ public class LocalSession {
             if (bytesRead > 0) {
                 localReadBuffer.flip();
                 // 转发数据到远程服务器
+                boolean wasEmpty = writeRemoteQueue.isEmpty();
                 writeRemoteQueue.offer(localReadBuffer.duplicate());
+                
+                // 修复：如果写队列之前为空，现在有数据了，需要重新注册写事件
+                if (wasEmpty) {
+                    SelectionKey key = remoteDataChannel.keyFor(client.getSelector());
+                    if (key != null && key.isValid()) {
+                        key.interestOps(key.interestOps() | SelectionKey.OP_WRITE);
+                    }
+                }
             }
 
         } catch (IOException e) {
@@ -96,6 +106,14 @@ public class LocalSession {
                     writeLocalQueue.poll();
                 }
             }
+            
+            // 修复：当写队列为空时，取消写事件监听
+            if (writeLocalQueue.isEmpty()) {
+                SelectionKey key = localDataChannel.keyFor(client.getSelector());
+                if (key != null && key.isValid()) {
+                    key.interestOps(key.interestOps() & ~SelectionKey.OP_WRITE);
+                }
+            }
         } catch (IOException e) {
             logger.error("写入本地连接数据失败: {}", tunnelId, e);
             close();
@@ -124,7 +142,16 @@ public class LocalSession {
             if (bytesRead > 0) {
                 remoteReadBuffer.flip();
                 // 转发数据到本地
+                boolean wasEmpty = writeLocalQueue.isEmpty();
                 writeLocalQueue.offer(remoteReadBuffer.duplicate());
+                
+                // 修复：如果写队列之前为空，现在有数据了，需要重新注册写事件
+                if (wasEmpty) {
+                    SelectionKey key = localDataChannel.keyFor(client.getSelector());
+                    if (key != null && key.isValid()) {
+                        key.interestOps(key.interestOps() | SelectionKey.OP_WRITE);
+                    }
+                }
             }
 
         } catch (IOException e) {
@@ -154,6 +181,14 @@ public class LocalSession {
 
                 if (!buffer.hasRemaining()) {
                     writeRemoteQueue.poll();
+                }
+            }
+            
+            // 修复：当写队列为空时，取消写事件监听
+            if (writeRemoteQueue.isEmpty()) {
+                SelectionKey key = remoteDataChannel.keyFor(client.getSelector());
+                if (key != null && key.isValid()) {
+                    key.interestOps(key.interestOps() & ~SelectionKey.OP_WRITE);
                 }
             }
         } catch (IOException e) {

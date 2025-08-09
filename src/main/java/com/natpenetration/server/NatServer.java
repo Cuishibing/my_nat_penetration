@@ -172,7 +172,7 @@ public class NatServer {
             this.clientSession = clientSession;
             this.clientConnected = true;
 
-            clientChannel.register(selector, SelectionKey.OP_READ | SelectionKey.OP_WRITE, clientSession);
+            clientChannel.register(selector, SelectionKey.OP_READ, clientSession);
             logger.info("新的客户端连接: {} -> {}", clientChannel.getRemoteAddress(), clientId);
 
         } else if (serverSocketChannel == tunnelOuterChannel) {
@@ -182,11 +182,11 @@ public class NatServer {
             TunnelSession tunnelSession = new TunnelSession(tunnelId, clientChannel, this);
             tunnels.put(tunnelId, tunnelSession);
 
-            clientChannel.register(selector, SelectionKey.OP_READ | SelectionKey.OP_WRITE, new SelectionKeyForTunnelSession(tunnelSession, 1));
+            clientChannel.register(selector, SelectionKey.OP_READ, new SelectionKeyForTunnelSession(tunnelSession, 1));
             logger.info("新的隧道连接: {} -> {}", clientChannel.getRemoteAddress(), tunnelId);
         } else if (key.attachment() instanceof TunnelSession tunnelSession) {
             tunnelSession.setChannelForClient(clientChannel);
-            clientChannel.register(selector, SelectionKey.OP_READ | SelectionKey.OP_WRITE, new SelectionKeyForTunnelSession(tunnelSession, 2));
+            clientChannel.register(selector, SelectionKey.OP_READ, new SelectionKeyForTunnelSession(tunnelSession, 2));
             logger.info("新的客户端数据连接: {} -> {}", clientChannel.getRemoteAddress(), serverSocketChannel.getLocalAddress());
         }
     }
